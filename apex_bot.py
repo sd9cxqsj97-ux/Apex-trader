@@ -11,7 +11,7 @@ Dynamic risk tiers | Stoch + RSI + EMA entry
 import os, time, json, logging, math, requests
 from datetime import datetime, timezone
 
-# ── CONFIG ──────────────────────────────────────────────────────
+# CONFIG
 
 API_KEY    = os.environ.get(“OANDA_API_KEY”,    “bf70bcd936733bc516622f1dbdc1dacb-b9439874df7ea93be60da791a9252f15”)
 ACCOUNT_ID = os.environ.get(“OANDA_ACCOUNT_ID”, “101-004-38946931-001”)
@@ -21,7 +21,7 @@ HEADERS    = {“Authorization”: f”Bearer {API_KEY}”, “Content-Type”: 
 # Instrument profiles
 
 INSTRUMENTS = {
-# Forex — swing only
+# Forex  swing only
 “EUR_USD”:   {“name”:“EUR/USD”,  “type”:“forex”,  “scalp”:False},
 “GBP_USD”:   {“name”:“GBP/USD”,  “type”:“forex”,  “scalp”:False},
 “USD_JPY”:   {“name”:“USD/JPY”,  “type”:“forex”,  “scalp”:False},
@@ -35,13 +35,13 @@ INSTRUMENTS = {
 “AUD_JPY”:   {“name”:“AUD/JPY”,  “type”:“forex”,  “scalp”:False},
 “EUR_AUD”:   {“name”:“EUR/AUD”,  “type”:“forex”,  “scalp”:False},
 “GBP_CAD”:   {“name”:“GBP/CAD”,  “type”:“forex”,  “scalp”:False},
-# Gold + Silver — swing + scalp
+# Gold + Silver  swing + scalp
 “XAU_USD”:   {“name”:“Gold”,     “type”:“metal”,  “scalp”:True},
 “XAG_USD”:   {“name”:“Silver”,   “type”:“metal”,  “scalp”:False},
-# Oil — swing + scalp
+# Oil  swing + scalp
 “BCO_USD”:   {“name”:“Brent”,    “type”:“energy”, “scalp”:True},
 “WTICO_USD”: {“name”:“WTI Oil”,  “type”:“energy”, “scalp”:True},
-# Indices — swing only
+# Indices  swing only
 “SPX500_USD”:{“name”:“S&P 500”,  “type”:“index”,  “scalp”:False},
 “NAS100_USD”:{“name”:“Nasdaq”,   “type”:“index”,  “scalp”:False},
 “US30_USD”:  {“name”:“Dow 30”,   “type”:“index”,  “scalp”:False},
@@ -54,7 +54,7 @@ TIMEFRAMES = {
 “swing_scalp”: [“H1”, “H4”, “D”],
 }
 
-# ── DYNAMIC RISK TIERS ──────────────────────────────────────────
+# DYNAMIC RISK TIERS
 
 RISK_TIERS = [
 {“min”:    0, “max”:  1000, “lots”:0.10, “risk_pct”:0.10, “daily_loss_pct”:0.20},
@@ -78,7 +78,7 @@ STATE_FILE      = “state.json”
 logging.basicConfig(level=logging.INFO, format=”%(asctime)s [%(levelname)s] %(message)s”)
 log = logging.getLogger(“APEX”)
 
-# ── STATE ───────────────────────────────────────────────────────
+# STATE
 
 def load_state():
 try:
@@ -92,7 +92,7 @@ def save_state(s):
 with open(STATE_FILE,“w”) as f:
 json.dump(s, f, indent=2, default=str)
 
-# ── OANDA ───────────────────────────────────────────────────────
+# OANDA
 
 def og(path):
 r = requests.get(f”{BASE_URL}{path}”, headers=HEADERS, timeout=15)
@@ -148,7 +148,7 @@ def set_sl(tid, sl):
 return oput(f”/accounts/{ACCOUNT_ID}/trades/{tid}/orders”,
 {“stopLoss”:{“price”:f”{sl:.5f}”,“timeInForce”:“GTC”}})
 
-# ── TECHNICALS ──────────────────────────────────────────────────
+# TECHNICALS
 
 def extract(candles):
 c = [x for x in candles if x[“complete”]]
@@ -221,7 +221,7 @@ if bp>=3 and stoch_bull: return “LONG”
 if brp>=3 and stoch_bear: return “SHORT”
 return “NONE”
 
-# ── REVERSAL CHECK (3 of 5) ─────────────────────────────────────
+# REVERSAL CHECK (3 of 5)
 
 def reversal(dir_, RSI, e20d, candles, closes, vols, sk, sd, sk_prev, sd_prev):
 hits=0
@@ -247,7 +247,7 @@ elif dir_==“SHORT” and sk_prev<sd_prev and sk>sd and sk<30: hits+=1; log.inf
 log.info(f”Reversal conditions: {hits}/5”)
 return hits>=3
 
-# ── RISK ─────────────────────────────────────────────────────────
+# RISK
 
 def get_tier(bal):
 for t in RISK_TIERS:
@@ -266,10 +266,10 @@ def can_trade(state, bal):
 tier=get_tier(bal)
 limit=bal*tier[“daily_loss_pct”]
 if state[“daily_loss”]>=limit:
-log.warning(f”Daily loss limit: £{state[‘daily_loss’]:.2f}/£{limit:.2f} — paused”)
+log.warning(f”Daily loss limit: {state[‘daily_loss’]:.2f}/{limit:.2f}  paused”)
 return False
 if state[“consecutive_losses”]>=3:
-log.warning(“3 consecutive losses — pausing 4 hours”)
+log.warning(“3 consecutive losses  pausing 4 hours”)
 return False
 return True
 
@@ -279,7 +279,7 @@ if now.weekday()==0 and now.hour<10: return True   # Mon pre-10am
 if now.weekday()==4 and now.hour>=15: return True  # Fri post-3pm
 return False
 
-# ── MANAGE OPEN TRADES ──────────────────────────────────────────
+# MANAGE OPEN TRADES
 
 def manage_trades(state):
 if not state[“open_trades”]: return state
@@ -300,7 +300,7 @@ for tid, info in list(state["open_trades"].items()):
             "closed_at":datetime.now(timezone.utc).isoformat()
         })
         del state["open_trades"][tid]
-        log.info(f"Trade {tid} closed — {result} PL:{pl:.2f}")
+        log.info(f"Trade {tid} closed  {result} PL:{pl:.2f}")
         continue
 
     # Update unrealized PL
@@ -325,7 +325,7 @@ for tid, info in list(state["open_trades"].items()):
             new_sl = (mid-atr_v*params["trail_step"] if dir_=="LONG" else mid+atr_v*params["trail_step"])
             cur_sl = info.get("current_sl",0)
             if (dir_=="LONG" and new_sl>cur_sl) or (dir_=="SHORT" and new_sl<cur_sl):
-                try: set_sl(tid, new_sl); info["current_sl"]=new_sl; log.info(f"{tid} trail → {new_sl:.5f}")
+                try: set_sl(tid, new_sl); info["current_sl"]=new_sl; log.info(f"{tid} trail  {new_sl:.5f}")
                 except: pass
 
         # Scalp max hold time
@@ -333,7 +333,7 @@ for tid, info in list(state["open_trades"].items()):
             opened=datetime.fromisoformat(info["opened_at"])
             age_h=(datetime.now(timezone.utc)-opened).total_seconds()/3600
             if age_h>params["max_hold_hours"]:
-                try: close_trade(tid); log.info(f"{tid} scalp max hold hit — closed"); continue
+                try: close_trade(tid); log.info(f"{tid} scalp max hold hit  closed"); continue
                 except: pass
 
         # Reversal check on H4
@@ -345,7 +345,7 @@ for tid, info in list(state["open_trades"].items()):
             e50=ema(closes,min(50,len(closes))); e50d=((mid-e50)/e50)*100
             sk,sd,skp,sdp=stoch(closes,highs,lows)
             if reversal(dir_,RSI,e20d,candles,closes,vols,sk,sd,skp,sdp):
-                try: close_trade(tid); log.info(f"{tid} early exit — reversal confirmed"); continue
+                try: close_trade(tid); log.info(f"{tid} early exit  reversal confirmed"); continue
                 except: pass
 
     except Exception as e:
@@ -355,7 +355,7 @@ save_state(state)
 return state
 ```
 
-# ── SCAN & ENTER ────────────────────────────────────────────────
+# SCAN & ENTER
 
 def scan_and_trade(state):
 try:
@@ -367,17 +367,17 @@ open_count=len(state[“open_trades”])
 open_instruments={v[“instrument”] for v in state[“open_trades”].values()}
 
 ```
-    log.info(f"Balance: £{bal:.2f} | Tier: {lots} lots | Open: {open_count}/{MAX_OPEN_TRADES}")
+    log.info(f"Balance: {bal:.2f} | Tier: {lots} lots | Open: {open_count}/{MAX_OPEN_TRADES}")
 
     if open_count>=MAX_OPEN_TRADES:
-        log.info("Max open trades reached — skipping scan")
+        log.info("Max open trades reached  skipping scan")
         return state
 
     if not can_trade(state, bal):
         return state
 
     if bad_time():
-        log.info("Bad trading time — skipping")
+        log.info("Bad trading time  skipping")
         return state
 
     for inst_id, inst_info in INSTRUMENTS.items():
@@ -422,7 +422,7 @@ open_instruments={v[“instrument”] for v in state[“open_trades”].values()
                 params = TRADE_PARAMS[trade_type]
 
                 if ATR==0:
-                    log.warning(f"{inst_id} ATR=0 — skipping")
+                    log.warning(f"{inst_id} ATR=0  skipping")
                     continue
 
                 if DIR=="LONG":
@@ -434,7 +434,7 @@ open_instruments={v[“instrument”] for v in state[“open_trades”].values()
                     sl=bid+ATR*params["sl_atr"]
                     entry=bid
 
-                log.info(f"🚀 SIGNAL: {inst_id} {DIR} {trade_type.upper()} | Entry:{entry:.5f} TP:{tp:.5f} SL:{sl:.5f} | Score:{S}")
+                log.info(f" SIGNAL: {inst_id} {DIR} {trade_type.upper()} | Entry:{entry:.5f} TP:{tp:.5f} SL:{sl:.5f} | Score:{S}")
 
                 result=place_order(inst_id, DIR, lots, tp, sl)
                 filled=result.get("orderFillTransaction",{})
@@ -453,7 +453,7 @@ open_instruments={v[“instrument”] for v in state[“open_trades”].values()
                     state["total"]+=1
                     open_count+=1
                     open_instruments.add(inst_id)
-                    log.info(f"✅ Trade opened: ID {trade_id} | {inst_id} {DIR} {trade_type}")
+                    log.info(f" Trade opened: ID {trade_id} | {inst_id} {DIR} {trade_type}")
                     save_state(state)
                     break  # One trade per instrument across timeframes
 
@@ -467,7 +467,7 @@ except Exception as e:
 return state
 ```
 
-# ── MAIN LOOP ───────────────────────────────────────────────────
+# MAIN LOOP
 
 def main():
 log.info(”=” * 50)
@@ -482,16 +482,16 @@ state=load_state()
 while True:
     try:
         state=daily_reset(state)
-        log.info("── Managing open trades ──")
+        log.info(" Managing open trades ")
         state=manage_trades(state)
-        log.info("── Scanning for new setups ──")
+        log.info(" Scanning for new setups ")
         state=scan_and_trade(state)
         save_state(state)
 
         wins=state["wins"]; losses=state["losses"]
         total=wins+losses
         wr=wins/total*100 if total>0 else 0
-        log.info(f"Stats: {wins}W/{losses}L ({wr:.0f}%) | Daily loss: £{state['daily_loss']:.2f}")
+        log.info(f"Stats: {wins}W/{losses}L ({wr:.0f}%) | Daily loss: {state['daily_loss']:.2f}")
         log.info(f"Sleeping 4 hours until next scan...")
         time.sleep(4*60*60)
 
