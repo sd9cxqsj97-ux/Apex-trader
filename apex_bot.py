@@ -1,12 +1,12 @@
-# #!/usr/bin/env python3
-“””
-APEX AUTO-TRADER
+#!/usr/bin/env python3
 
-Swing trading on all forex pairs (H4/D)
-Swing + Scalp on Gold, Oil, BTC (H1/H4/D)
-Dynamic risk tiers | Stoch + RSI + EMA entry
-3-of-5 reversal exit | Trailing stop | Breakeven
-“””
+# APEX AUTO-TRADER
+
+# Swing: all forex H4/D
+
+# Scalp+Swing: Gold, Oil H1/H4/D
+
+# Dynamic risk | Stoch+RSI+EMA | 3-of-5 exit
 
 import os, time, json, logging, math, requests
 from datetime import datetime, timezone
