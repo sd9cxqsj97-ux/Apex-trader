@@ -13,8 +13,8 @@ from datetime import datetime, timezone
 
 # CONFIG
 
-API_KEY    = os.environ.get(“OANDA_API_KEY”)
-ACCOUNT_ID = os.environ.get(“OANDA_ACCOUNT_ID”)
+API_KEY    = os.environ.get('OANDA_API_KEY')
+ACCOUNT_ID = os.environ.get('OANDA_ACCOUNT_ID')
 BASE_URL   = “https://api-fxpractice.oanda.com/v3”
 HEADERS    = {“Authorization”: f”Bearer {API_KEY}”, “Content-Type”: “application/json”}
 
