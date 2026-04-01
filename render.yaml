@@ -1,0 +1,11 @@
+services:
+  - type: worker
+    name: apex-autotrader
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python apex_bot.py
+    envVars:
+      - key: OANDA_API_KEY
+        value: bf70bcd936733bc516622f1dbdc1dacb-b9439874df7ea93be60da791a9252f15
+      - key: OANDA_ACCOUNT_ID
+        value: 101-004-38946931-001
