@@ -116,10 +116,10 @@ def get_open_trades_api():
 return og(f”/accounts/{ACCOUNT_ID}/openTrades”)[“trades”]
 
 def get_candles(inst, gran, count=100):
-return og(f”/instruments/{inst}/candles?count={count}&granularity={gran}&price=M”)[“candles”]
+return og(f”/instruments/{inst}/candlescount={count}&granularity={gran}&price=M”)[“candles”]
 
 def get_price(inst):
-d = og(f”/accounts/{ACCOUNT_ID}/pricing?instruments={inst}”)[“prices”][0]
+d = og(f”/accounts/{ACCOUNT_ID}/pricinginstruments={inst}”)[“prices”][0]
 return float(d[“bids”][0][“price”]), float(d[“asks”][0][“price”])
 
 def place_order(inst, direction, lots, tp, sl):
