@@ -118,6 +118,23 @@ def api_feargreed():
 # ================================================================
 # HEALTH CHECK
 # ================================================================
+@app.route("/api/ftmo")
+def api_ftmo():
+    """FTMO challenge state — balance, daily loss, drawdown, days traded"""
+    try:
+        import json as _json
+        with open(os.path.join(BOT_DIR, "state.json")) as f:
+            st = _json.load(f)
+        return jsonify({
+            "ftmo_daily_loss":  st.get("ftmo_daily_loss", 0.0),
+            "ftmo_peak_bal":    st.get("ftmo_peak_bal", 10000.0),
+            "ftmo_days_traded": st.get("ftmo_days_traded", []),
+            "wins":  st.get("wins", 0),
+            "losses":st.get("losses", 0),
+        })
+    except Exception as e:
+        return jsonify({"error": str(e), "ftmo_daily_loss": 0, "ftmo_peak_bal": 10000, "ftmo_days_traded": []})
+
 @app.route("/api/ping")
 def ping():
     return jsonify({

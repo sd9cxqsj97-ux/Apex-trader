@@ -458,7 +458,7 @@ canvas#eq-chart{width:100% !important;height:140px !important}
     </div>
   </div>
 
-  <!-- SIGNALS TAB -->
+  <!-- SIGNALS / FTMO SCANNER TAB -->
   <div class="panel" id="pnl-signals">
     <div class="topbar" style="position:sticky;top:0">
       <div class="tb-left">
@@ -466,28 +466,16 @@ canvas#eq-chart{width:100% !important;height:140px !important}
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
           REFRESH
         </button>
+        <div class="filter-chips">
+          <div class="chip on" onclick="filterSigs(this,'ALL')" data-sf="ALL">ALL</div>
+          <div class="chip" onclick="filterSigs(this,'LONG')" data-sf="LONG">LONG</div>
+          <div class="chip" onclick="filterSigs(this,'SHORT')" data-sf="SHORT">SHORT</div>
+          <div class="chip" onclick="filterSigs(this,'SMC')" data-sf="SMC">SMC</div>
+        </div>
       </div>
       <div class="tb-time" id="sig-count-lbl">-- signals</div>
     </div>
-    <div class="tbl-wrap">
-      <table class="sig-table">
-        <thead>
-          <tr>
-            <th>TIME</th>
-            <th>INST</th>
-            <th>TF</th>
-            <th>DIR</th>
-            <th>SCORE</th>
-            <th>REGIME</th>
-            <th>STRATS</th>
-            <th>AI%</th>
-          </tr>
-        </thead>
-        <tbody id="sig-tbody">
-          <tr><td colspan="8" style="text-align:center;padding:30px;color:var(--mi);font-family:var(--mn);font-size:10px">Loading...</td></tr>
-        </tbody>
-      </table>
-    </div>
+    <div id="ftmo-scanner-list"></div>
   </div>
 
   <!-- BRAIN TAB (live bot log) -->
@@ -949,40 +937,134 @@ function setTF(tf, btn) {
 }
 
 // ============================================================
-// SIGNAL HISTORY TAB
+// FTMO SCANNER — Signal History with copy-trade cards
 // ============================================================
+var MT4_MAP = {
+  "XAU_USD":"XAUUSD","EUR_USD":"EURUSD","GBP_USD":"GBPUSD","USD_JPY":"USDJPY",
+  "XBT_USD":"BTCUSD","SPX500_USD":"US500","NAS100_USD":"US100","BCO_USD":"UKOIL",
+  "AUD_USD":"AUDUSD","USD_CAD":"USDCAD","USD_CHF":"USDCHF","NZD_USD":"NZDUSD",
+  "EUR_GBP":"EURGBP","EUR_JPY":"EURJPY","GBP_JPY":"GBPJPY","AUD_JPY":"AUDJPY",
+  "XAG_USD":"XAGUSD","WTICO_USD":"USOIL","US30_USD":"US30"
+};
+var _sigFilter = "ALL";
+var _allSigHistory = [];
+
+function filterSigs(el, f) {
+  document.querySelectorAll("[data-sf]").forEach(function(c){ c.classList.remove("on"); });
+  el.classList.add("on");
+  _sigFilter = f;
+  renderScannerCards(_allSigHistory);
+}
+
+function renderScannerCards(sigs) {
+  var el  = document.getElementById("ftmo-scanner-list");
+  var lbl = document.getElementById("sig-count-lbl");
+  if(!sigs||sigs.length===0) {
+    el.innerHTML = '<div class="empty-state"><div class="empty-ico">&#9676;</div><div class="empty-txt">No signals yet — bot scans every 30-120s</div></div>';
+    lbl.textContent = "0 signals";
+    return;
+  }
+  var filtered = sigs.slice().reverse();
+  if(_sigFilter === "LONG")  filtered = filtered.filter(function(s){ return (s.direction||"").toUpperCase()==="LONG"; });
+  if(_sigFilter === "SHORT") filtered = filtered.filter(function(s){ return (s.direction||"").toUpperCase()==="SHORT"; });
+  if(_sigFilter === "SMC")   filtered = filtered.filter(function(s){ return (s.strategies||"").indexOf("SMC_")>=0; });
+  lbl.textContent = filtered.length + " signals";
+
+  el.innerHTML = filtered.slice(0,100).map(function(s,idx){
+    var dir    = (s.direction||"LONG").toUpperCase();
+    var score  = parseInt(s.score||0);
+    var inst   = s.instrument||"--";
+    var mt4    = MT4_MAP[inst] || inst.replace("_","");
+    var tf     = s.timeframe||"--";
+    var regime = s.regime||"RANGING";
+    var strats = (s.strategies||s.strategy||"").split(",").filter(function(x){return x.trim();});
+    var isSMC  = strats.some(function(x){return x.trim().indexOf("SMC_")>=0;});
+    var ai     = s.ai_score ? parseFloat(s.ai_score).toFixed(0) : "?";
+    var ml     = s.ml_prob||s.ml_pred||"?";
+    var ts     = fmtTime(s.timestamp||s.time);
+    var isLong = dir==="LONG";
+    var scl    = scoreColor(score);
+    var rng    = parseFloat(s.atr||0);
+
+    // Score bar
+    var bars = Math.round(score/10);
+    var barHtml = "";
+    for(var b=0;b<10;b++) {
+      barHtml += '<span style="display:inline-block;width:6px;height:8px;border-radius:1px;margin-right:1px;background:'+(b<bars?scl:"var(--b2)")+'"></span>';
+    }
+
+    var copyId = "copy-"+idx;
+    var copyText = mt4+"\n"+(isLong?"BUY":"SELL")+"\n"+(s.entry||"market")+"\n"+(s.tp||"--")+"\n"+(s.sl||"--");
+
+    return '<div class="sig-card '+(isLong?"long":"short")+(isSMC?" smc":"")+'" style="margin-top:'+(idx===0?8:0)+'px">' +
+      '<div class="sig-card-top">' +
+        '<div>' +
+          '<div style="display:flex;align-items:center;gap:8px">' +
+            '<div class="sc-inst" style="color:'+(isLong?"var(--g)":"var(--r)")+';font-size:18px">' + mt4 + '</div>' +
+            '<div class="dir-badge '+(isLong?"long":"short")+'">' + (isLong?"BUY":"SELL") + '</div>' +
+            (isSMC?'<span class="badge smc-b">SMC</span>':'') +
+          '</div>' +
+          '<div class="sc-meta" style="margin-top:3px">' +
+            '<span style="color:var(--mi)">MT4/MT5</span>' +
+            '<span>'+tf+'</span><span>'+ts+'</span>' +
+          '</div>' +
+        '</div>' +
+        makeGauge(score, "sg"+idx) +
+      '</div>' +
+
+      // FTMO Copy Box
+      '<div style="margin:0 12px 8px;background:var(--b);border:1px solid '+(isLong?"rgba(0,230,118,.2)":"rgba(255,68,68,.2)")+';border-radius:6px;padding:10px">' +
+        '<div style="font-family:var(--mn);font-size:8px;letter-spacing:1.5px;color:var(--mi);margin-bottom:6px">COPY TO MT4/MT5</div>' +
+        '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px">' +
+          '<div style="background:var(--s2);border-radius:4px;padding:5px;text-align:center">' +
+            '<div style="font-size:7px;color:var(--mi);font-family:var(--mn)">ENTRY</div>' +
+            '<div style="font-size:10px;font-weight:700;font-family:var(--mn);color:var(--tx)">'+(s.entry?parseFloat(s.entry).toFixed(5):"MARKET")+'</div>' +
+          '</div>' +
+          '<div style="background:var(--s2);border-radius:4px;padding:5px;text-align:center">' +
+            '<div style="font-size:7px;color:var(--mi);font-family:var(--mn)">TAKE PROFIT</div>' +
+            '<div style="font-size:10px;font-weight:700;font-family:var(--mn);color:var(--g)">'+(s.tp?parseFloat(s.tp).toFixed(5):"--")+'</div>' +
+          '</div>' +
+          '<div style="background:var(--s2);border-radius:4px;padding:5px;text-align:center">' +
+            '<div style="font-size:7px;color:var(--mi);font-family:var(--mn)">STOP LOSS</div>' +
+            '<div style="font-size:10px;font-weight:700;font-family:var(--mn);color:var(--r)">'+(s.sl?parseFloat(s.sl).toFixed(5):"--")+'</div>' +
+          '</div>' +
+        '</div>' +
+        '<button onclick="copySig(\''+copyId+'\')" id="'+copyId+'" style="margin-top:8px;width:100%;padding:7px;background:rgba('+(isLong?"0,230,118":"255,68,68")+',0.12);border:1px solid rgba('+(isLong?"0,230,118":"255,68,68")+',0.3);border-radius:5px;color:'+(isLong?"var(--g)":"var(--r)")+';font-family:var(--mn);font-size:10px;cursor:pointer;letter-spacing:1px" data-copy="'+mt4+'|'+(isLong?"BUY":"SELL")+'|'+(s.entry||"")+'|'+(s.tp||"")+'|'+(s.sl||"")+'">COPY TRADE DETAILS</button>' +
+      '</div>' +
+
+      // Stats row
+      '<div class="sig-grid" style="padding-bottom:10px">' +
+        '<div class="sg-cell"><div class="sg-lbl">SCORE</div><div class="sg-val" style="color:'+scl+'">'+score+'</div></div>' +
+        '<div class="sg-cell"><div class="sg-lbl">REGIME</div><div class="sg-val" style="font-size:8px;color:var(--cy)">'+regime+'</div></div>' +
+        '<div class="sg-cell"><div class="sg-lbl">AI SCORE</div><div class="sg-val pu">'+ai+'%</div></div>' +
+        '<div class="sg-cell"><div class="sg-lbl">ML WIN%</div><div class="sg-val gold">'+ml+'%</div></div>' +
+        '<div class="sg-cell"><div class="sg-lbl">STRATS</div><div class="sg-val up">'+strats.length+'</div></div>' +
+        '<div class="sg-cell"><div class="sg-lbl">BARS</div><div style="display:flex;align-items:center;padding-top:3px">'+barHtml+'</div></div>' +
+      '</div>' +
+    '</div>';
+  }).join("");
+}
+
+function copySig(btnId) {
+  var btn  = document.getElementById(btnId);
+  var data = btn.getAttribute("data-copy").split("|");
+  var inst = data[0], dir = data[1], en = data[2], tp = data[3], sl = data[4];
+  var txt  = "Instrument: "+inst+"\nAction: "+dir+"\nEntry: "+(en||"Market")+"\nTP: "+(tp||"--")+"\nSL: "+(sl||"--");
+  try {
+    navigator.clipboard.writeText(txt).then(function(){
+      btn.textContent = "COPIED!";
+      setTimeout(function(){ btn.textContent = "COPY TRADE DETAILS"; }, 2000);
+    });
+  } catch(e) {
+    showToast(inst+" "+dir+" | Entry:"+en+" TP:"+tp+" SL:"+sl, 5000);
+  }
+}
+
 function loadSignalHistory() {
   api("/api/signals?n=500", function(d){
-    var tbody = document.getElementById("sig-tbody");
-    var lbl   = document.getElementById("sig-count-lbl");
-    if(!d||!d.signals||d.signals.length===0) {
-      tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;padding:30px;color:var(--mi);font-family:var(--mn);font-size:10px">No signal history yet</td></tr>';
-      lbl.textContent = "0 signals";
-      return;
-    }
-    var sigs = d.signals.slice().reverse();
-    lbl.textContent = sigs.length + " signals";
-    tbody.innerHTML = sigs.slice(0, 200).map(function(s){
-      var dir   = (s.direction||"LONG").toUpperCase();
-      var score = parseInt(s.score||0);
-      var regime= s.regime||"--";
-      var strats= (s.strategies||s.strategy||"").split(",").filter(function(x){return x.trim();}).slice(0,3).join(", ");
-      var ai    = s.ai_score ? parseFloat(s.ai_score).toFixed(0)+"%" : "--";
-      var ts    = fmtTime(s.timestamp||s.time);
-      var inst  = (s.instrument||"--").replace("_","/");
-      var cls   = dir==="LONG"?"long-row":"short-row";
-      var scl   = score>=80?"win-cell":score>=65?"gold-cell":"";
-      return '<tr class="'+cls+'">' +
-        '<td style="color:var(--mi)">'+ts+'</td>' +
-        '<td style="font-family:var(--mn);font-weight:600">'+inst+'</td>' +
-        '<td style="color:var(--mi)">'+s.timeframe+'</td>' +
-        '<td style="color:'+(dir==="LONG"?"var(--g)":"var(--r)")+'">'+dir+'</td>' +
-        '<td class="'+scl+'">'+score+'</td>' +
-        '<td style="color:var(--cy);font-size:9px">'+regime+'</td>' +
-        '<td style="color:var(--mi);font-size:9px">'+strats+'</td>' +
-        '<td class="pu-cell" style="color:var(--pu)">'+ai+'</td>' +
-      '</tr>';
-    }).join("");
+    if(!d) { showToast("Cannot reach proxy"); return; }
+    _allSigHistory = d.signals||[];
+    renderScannerCards(_allSigHistory);
   });
 }
 
@@ -1218,7 +1300,7 @@ function loadFTMO() {
   oanda("accounts/"+ACCT+"/summary", function(d){
     if(!d||!d.account) return;
     var bal = parseFloat(d.account.balance||0);
-    api("/api/status", function(s){
+    api("/api/ftmo", function(s){
       var dailyLoss = s ? parseFloat(s.ftmo_daily_loss||0) : 0;
       var peakBal   = s ? parseFloat(s.ftmo_peak_bal||FTMO_START) : FTMO_START;
       var days      = s ? (s.ftmo_days_traded||[]).length : 0;

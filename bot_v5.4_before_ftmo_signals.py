@@ -326,96 +326,6 @@ def alert(title,msg,priority="default",tags="chart_with_upwards_trend"):
     telegram("<b>"+title+"</b>\n"+msg)
     log.info("[ALERT] "+title+": "+msg[:100])
 
-# MT4/MT5 instrument names for FTMO platform (OANDA names differ)
-MT4_NAMES = {
-    "XAU_USD":    "XAUUSD",
-    "EUR_USD":    "EURUSD",
-    "GBP_USD":    "GBPUSD",
-    "USD_JPY":    "USDJPY",
-    "AUD_USD":    "AUDUSD",
-    "USD_CAD":    "USDCAD",
-    "USD_CHF":    "USDCHF",
-    "NZD_USD":    "NZDUSD",
-    "EUR_GBP":    "EURGBP",
-    "EUR_JPY":    "EURJPY",
-    "GBP_JPY":    "GBPJPY",
-    "AUD_JPY":    "AUDJPY",
-    "XAG_USD":    "XAGUSD",
-    "BCO_USD":    "UKOIL",
-    "WTICO_USD":  "USOIL",
-    "SPX500_USD": "US500",
-    "NAS100_USD": "US100",
-    "US30_USD":   "US30",
-    "XBT_USD":    "BTCUSD",
-}
-
-def ftmo_signal_alert(iid, result, bal, state):
-    """Send a beautifully formatted FTMO copy-trade alert to Telegram.
-    Includes MT4 instrument name, exact entry/TP/SL, lots, and FTMO status."""
-    try:
-        mt4  = MT4_NAMES.get(iid, iid.replace("_",""))
-        dir_ = result["dir"]
-        en   = result["en"]
-        tp   = result["tp"]
-        sl   = result["sl"]
-        lots = result["lots"]
-        sc   = result["score"]
-        tf   = result["tf"]
-        reg  = result.get("regime","?")
-        ai   = result.get("ai_reason","")
-        ml   = result.get("ml_pred",50)
-        sigs = result.get("sigs",[])
-        smc  = [s for s in sigs if s.startswith("SMC_")]
-        at   = result.get("AT",0)
-        rr   = round(abs(tp-en)/abs(sl-en),1) if abs(sl-en)>0 else 0
-
-        dir_arrow = "BUY" if dir_=="LONG" else "SELL"
-        dir_emoji = "green_circle" if dir_=="LONG" else "red_circle"
-
-        # FTMO progress
-        profit     = bal - FTMO_START_BAL
-        profit_pct = profit / FTMO_START_BAL * 100
-        daily_loss = state.get("ftmo_daily_loss",0.0)
-        daily_pct  = daily_loss / FTMO_START_BAL * 100
-        days_traded= len(state.get("ftmo_days_traded",[]))
-
-        # Score bar (visual)
-        bars = int(sc/10)
-        score_bar = ("=" * bars) + ("-" * (10-bars))
-
-        msg  = "FTMO SIGNAL - COPY TO MT4\n"
-        msg += "=" * 30 + "\n"
-        msg += "Instrument: <b>" + mt4 + "</b>\n"
-        msg += "Action:     <b>" + dir_arrow + "</b>\n"
-        msg += "=" * 30 + "\n"
-        msg += "Entry:      <b>" + str(round(en,5)) + "</b>\n"
-        msg += "Take Profit:<b>" + str(round(tp,5)) + "</b>\n"
-        msg += "Stop Loss:  <b>" + str(round(sl,5)) + "</b>\n"
-        msg += "Lots:       <b>" + str(lots) + "</b> (FTMO safe)\n"
-        msg += "R:R Ratio:  <b>1:" + str(rr) + "</b>\n"
-        msg += "=" * 30 + "\n"
-        msg += "Timeframe:  " + tf + "\n"
-        msg += "Score:      [" + score_bar + "] " + str(sc) + "/100\n"
-        msg += "Regime:     " + reg + "\n"
-        msg += "ML Prob:    " + str(ml) + "% win\n"
-        if smc:
-            msg += "SMC:        " + ", ".join(smc) + "\n"
-        msg += "Strategies: " + ", ".join(sigs[:4]) + "\n"
-        if ai:
-            msg += "AI Verdict: " + ai[:80] + "\n"
-        msg += "=" * 30 + "\n"
-        msg += "FTMO STATUS:\n"
-        msg += "Profit:     " + ("%+.1f%%" % profit_pct) + " of 10% target\n"
-        msg += "Daily Loss: " + ("%.1f%%" % daily_pct) + " of 4% limit\n"
-        msg += "Days Traded:" + str(days_traded) + "/4 minimum\n"
-        msg += "=" * 30 + "\n"
-        msg += "ACT FAST — entry valid ~15 min"
-
-        telegram("<b>FTMO SIGNAL</b> " + mt4 + " <b>" + dir_arrow + "</b>\n\n<pre>" + msg + "</pre>")
-        log.info("FTMO signal alert sent: %s %s score=%d"%(mt4,dir_arrow,sc))
-    except Exception as e:
-        log.warning("FTMO signal alert error: "+str(e))
-
 # ================================================================
 # NEWS FILTER
 # ================================================================
@@ -1914,10 +1824,6 @@ def scan(state):
                          "Lots: "+str(final_lots)+" | Balance: $"+str(round(bal,2))+ftmo_tag)
                     if result["ai_reason"]: msg+="\nAI: "+result["ai_reason"]
                     alert("NEW "+result["dir"]+" "+trade_type,msg,"high","rocket")
-                    # FTMO: send detailed copy-trade signal to Telegram
-                    if FTMO_MODE:
-                        result["lots"] = final_lots
-                        ftmo_signal_alert(iid, result, bal, state)
                     log.info("Opened %s %s %s %s %s"%(tid,iid,result["dir"],result["tf"],trade_type))
             except Exception as e: log.warning("Place error %s: %s"%(iid,str(e)))
     except Exception as e: log.error("Scan error: "+str(e))
