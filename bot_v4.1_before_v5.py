@@ -277,141 +277,6 @@ def orderbook_bias(iid):
     return bias
 
 # ================================================================
-# BINANCE BTC DATA + FEAR & GREED INDEX
-# Free public APIs — no key needed
-# Used to sharpen BTC/crypto signals
-# ================================================================
-_btc_cache={"data":{},"ts":0}
-
-def get_btc_sentiment():
-    now=time.time()
-    if now-_btc_cache["ts"]<300: return _btc_cache["data"]
-    data={}
-    try:
-        r=requests.get("https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT",timeout=8)
-        if r.ok:
-            d=r.json()
-            chg=float(d.get("priceChangePercent",0))
-            data["price"]=float(d.get("lastPrice",0))
-            data["change_24h"]=chg
-            data["volume"]=float(d.get("quoteVolume",0))
-            data["bias"]="BULL" if chg>2.0 else ("BEAR" if chg<-2.0 else "NEUTRAL")
-    except: pass
-    try:
-        r2=requests.get("https://api.alternative.me/fng/?limit=1",timeout=8)
-        if r2.ok:
-            fng=r2.json().get("data",[{}])[0]
-            val=int(fng.get("value",50))
-            data["fear_greed"]=val
-            data["fear_greed_label"]=fng.get("value_classification","Neutral")
-            # Contrarian: extreme fear = buy, extreme greed = sell
-            data["fng_signal"]="BULL" if val<25 else ("BEAR" if val>75 else "NEUTRAL")
-    except: pass
-    if data:
-        _btc_cache["data"]=data; _btc_cache["ts"]=now
-        log.info("BTC: $%.0f %.1f%% F&G:%s"%(data.get("price",0),data.get("change_24h",0),data.get("fear_greed_label","?")))
-    return data
-
-# ================================================================
-# KEY LEVEL DETECTION
-# Previous day/week highs & lows + round numbers
-# Price always returns to these levels — highest quality entries
-# ================================================================
-def key_level_bonus(hi, lo, cl, atr):
-    """
-    Returns (at_key:bool, key_dir:str, bonus:int).
-    Fires when price is within 0.5 ATR of a major key level.
-    """
-    if len(cl)<30 or atr==0: return False,"NONE",0
-    mid=cl[-1]; bonus=0; direction="NONE"
-    d=min(24,len(cl)//3)
-    levels=[]
-    # Previous day high/low
-    if len(hi)>d*2:
-        levels.append(("PDH",max(hi[-d*2:-d]),"BEAR"))
-        levels.append(("PDL",min(lo[-d*2:-d]),"BULL"))
-    # Previous week high/low
-    w=min(120,len(cl)//2)
-    if len(hi)>w*2:
-        levels.append(("PWH",max(hi[-w*2:-w]),"BEAR"))
-        levels.append(("PWL",min(lo[-w*2:-w]),"BULL"))
-    # Round number (psychological level)
-    mag=10**max(0,len(str(int(mid)))-2)
-    rn=round(mid/mag)*mag
-    if rn>0: levels.append(("ROUND",rn,"BOTH"))
-    threshold=atr*0.5
-    for name,lv,lvdir in levels:
-        if lv>0 and abs(mid-lv)<threshold:
-            bonus+=15
-            direction=lvdir if lvdir!="BOTH" else ("BULL" if mid<lv else "BEAR")
-            log.info("KEY LEVEL %s=%.5f dist=%.5f"%(name,lv,abs(mid-lv)))
-    return bonus>0, direction, min(bonus,20)
-
-# ================================================================
-# FIBONACCI RETRACEMENT
-# 38.2%, 50%, 61.8% — every professional trader watches these
-# ================================================================
-def fib_bonus(hi, lo, cl, atr):
-    """Returns (at_fib:bool, fib_dir:str, bonus:int)."""
-    if len(cl)<50 or atr==0: return False,"NONE",0
-    n=min(60,len(cl))
-    sh=max(hi[-n:]); sl=min(lo[-n:]); rng=sh-sl
-    if rng==0: return False,"NONE",0
-    mid=cl[-1]
-    fibs={"38.2":sl+rng*0.382,"50.0":sl+rng*0.500,"61.8":sl+rng*0.618,"78.6":sl+rng*0.786}
-    threshold=atr*0.35
-    for name,lv in fibs.items():
-        if abs(mid-lv)<threshold:
-            direction="BULL" if mid<sl+rng*0.5 else "BEAR"
-            bonus=15 if name in ("50.0","61.8") else 10
-            log.info("FIB %s at %.5f"%(name,lv))
-            return True,direction,bonus
-    return False,"NONE",0
-
-# ================================================================
-# WEEKLY TREND BIAS
-# Only trade WITH the weekly trend — against it loses money
-# ================================================================
-_weekly={}
-
-def weekly_bias(iid):
-    now=time.time()
-    c=_weekly.get(iid,{})
-    if now-c.get("ts",0)<14400: return c.get("bias","NEUTRAL")
-    try:
-        cc=get_candles(iid,"D",20)
-        _,_,_,cl,_=parse_candles(cc)
-        if len(cl)<10: return "NEUTRAL"
-        e10=ema(cl,10); e20=ema(cl,min(20,len(cl)))
-        mid=cl[-1]
-        if mid>e10>e20 and cl[-1]>cl[-5]: bias="BULL"
-        elif mid<e10<e20 and cl[-1]<cl[-5]: bias="BEAR"
-        else: bias="NEUTRAL"
-        _weekly[iid]={"bias":bias,"ts":now}
-        log.info("%s weekly bias: %s"%(iid,bias))
-        return bias
-    except: return "NEUTRAL"
-
-# ================================================================
-# PIN BAR / HAMMER DETECTION
-# Strongest single-candle reversal signal used by professional traders
-# ================================================================
-def pin_bar(o, hi, lo, cl, atr):
-    """Returns (found:bool, direction:str)."""
-    if len(cl)<3 or atr==0: return False,"NONE"
-    co=o[-1]; ch=hi[-1]; cl2=lo[-1]; cc=cl[-1]
-    body=abs(cc-co)
-    upper_wick=ch-max(co,cc)
-    lower_wick=min(co,cc)-cl2
-    total=ch-cl2
-    if total<atr*0.3 or body==0: return False,"NONE"
-    # Hammer: long lower wick, small upper wick — bullish reversal
-    if lower_wick>body*2.0 and upper_wick<body*0.5: return True,"BULL"
-    # Shooting star: long upper wick, small lower wick — bearish reversal
-    if upper_wick>body*2.0 and lower_wick<body*0.5: return True,"BEAR"
-    return False,"NONE"
-
-# ================================================================
 # UK TIME
 # ================================================================
 def uk_hour():
@@ -775,11 +640,8 @@ def ml_predict(iid, tf, score, regime, h_utc, rsi_val, vr_val):
 # CLAUDE AI CONFIRMATION — APEX-AI
 # ================================================================
 def ai_confirm(iid, direction, sigs, score, context):
-    """Send signal to Claude for AI confirmation. Returns (adjusted_score, reason).
-    AI confirmation is ALWAYS ON — never skipped. If key missing, logs error."""
-    if not CLAUDE_API_KEY:
-        log.warning("CLAUDE_API_KEY not set — AI confirmation offline. Set env var on VPS.")
-        return score,"AI offline"
+    """Send signal to Claude for AI confirmation. Returns (adjusted_score, reason)."""
+    if not CLAUDE_API_KEY: return score,""
     try:
         prompt=(f"Rate forex signal 0-100 for trade quality. "
                 f"Pair:{iid} Dir:{direction} Base:{score} "
@@ -917,30 +779,6 @@ def check_strategies(o, hi, lo, cl, vols, mid, bid, ask, tf="H4", atr=0):
     zone,pct=smc_pd_zone(hi,lo,cl)
     if zone=="DISCOUNT" and RSI<50: bull.append("SMC_DISCOUNT")
     if zone=="PREMIUM"  and RSI>50: bear.append("SMC_PREMIUM")
-
-    # 20. Pin Bar — hammer or shooting star at key level
-    if atr>0:
-        pb_hit,pb_dir=pin_bar(o,hi,lo,cl,atr)
-        if pb_hit:
-            if pb_dir=="BULL": bull.append("PIN_BAR")
-            else: bear.append("PIN_BAR")
-
-    # 21. RSI Divergence (proper implementation — only fires at extremes)
-    # Bullish: price makes lower low but RSI makes higher low = hidden strength
-    # Bearish: price makes higher high but RSI makes lower high = hidden weakness
-    if len(RSIs)>=20 and len(cl)>=20:
-        try:
-            # Find two recent lows in price
-            pl1_idx=min(range(len(cl)-10,len(cl)-2),key=lambda i:cl[i])
-            pl2_idx=min(range(max(0,pl1_idx-15),pl1_idx-2),key=lambda i:cl[i])
-            if cl[pl1_idx]<cl[pl2_idx] and RSIs[pl1_idx]>RSIs[pl2_idx] and RSI<40:
-                bull.append("RSI_DIV")  # price lower low, RSI higher low = bullish div
-            # Find two recent highs in price
-            ph1_idx=max(range(len(cl)-10,len(cl)-2),key=lambda i:cl[i])
-            ph2_idx=max(range(max(0,ph1_idx-15),ph1_idx-2),key=lambda i:cl[i])
-            if cl[ph1_idx]>cl[ph2_idx] and RSIs[ph1_idx]<RSIs[ph2_idx] and RSI>60:
-                bear.append("RSI_DIV")  # price higher high, RSI lower high = bearish div
-        except: pass
 
     # 200 EMA filter — hard gate on H4/D, soft on scalp
     above200=(mid>e200)
@@ -1162,18 +1000,6 @@ def manage(state):
                     try: close_trade(tid); log.info(tid+" max hold")
                     except: pass
                     continue
-            # Partial TP at 0.8x ATR — close 50% of position, lock in profit
-            if pa>=0.8 and not info.get("partial_tp"):
-                try:
-                    ot=open_trades.get(tid,{})
-                    cur_units=int(abs(float(ot.get("currentUnits",0))))
-                    if cur_units>1:
-                        half=max(1,cur_units//2)
-                        oput("/accounts/"+ACCOUNT_ID+"/trades/"+tid+"/close",{"units":str(half)})
-                        info["partial_tp"]=True
-                        alert("PARTIAL TP",info["inst"]+" — closed 50% at %.1fR profit"%pa,"default","money_with_wings")
-                        log.info("%s partial TP: closed %d of %d units at %.1fR"%(tid,half,cur_units,pa))
-                except Exception as e: log.warning("Partial TP error "+tid+": "+str(e))
             # Breakeven at 1x ATR
             if pa>=1.0 and not info.get("be"):
                 try:
@@ -1260,49 +1086,12 @@ def scan_tf(iid, ii, tf, params, bal, state, oi):
                 if (ob==1 and base=="LONG") or (ob==-1 and base=="SHORT"): score=min(99,score+8)
                 else: score=max(0,score-8)
 
-        # ---- BINANCE BTC SENTIMENT (for BTC trades) ----
-        if "XBT" in iid:
-            btc=get_btc_sentiment()
-            btc_bias=btc.get("bias","NEUTRAL")
-            fng_sig=btc.get("fng_signal","NEUTRAL")
-            chg=btc.get("change_24h",0)
-            if btc_bias=="BULL" and base=="LONG":  score=min(99,score+10)
-            if btc_bias=="BEAR" and base=="SHORT": score=min(99,score+10)
-            if btc_bias=="BULL" and base=="SHORT": score=max(0,score-12)
-            if btc_bias=="BEAR" and base=="LONG":  score=max(0,score-12)
-            # Fear & Greed contrarian
-            if fng_sig=="BULL" and base=="LONG":  score=min(99,score+8)
-            if fng_sig=="BEAR" and base=="SHORT": score=min(99,score+8)
-            log.info("BTC sentiment: bias=%s F&G=%s change=%.1f%%"%(btc_bias,fng_sig,chg))
-
         # ---- COT BIAS ----
         cb=cot_bias(iid)
         if cb!="NEUTRAL":
             if (cb=="BULL" and base=="LONG") or (cb=="BEAR" and base=="SHORT"): score=min(99,score+10)
             elif (cb=="BULL" and base=="SHORT") or (cb=="BEAR" and base=="LONG"): score=max(0,score-15)
             log.info(iid+" COT:"+cb+" Score:"+str(score))
-
-        # ---- KEY LEVEL BONUS ----
-        kl_hit,kl_dir,kl_bonus=key_level_bonus(h2,l2,cl2,AT)
-        if kl_hit and (kl_dir==base or kl_dir=="BOTH"):
-            score=min(99,score+kl_bonus)
-            log.info("%s at KEY LEVEL +%d -> score %d"%(iid,kl_bonus,score))
-
-        # ---- FIBONACCI LEVEL BONUS ----
-        fib_hit,fib_dir,fb=fib_bonus(h2,l2,cl2,AT)
-        if fib_hit and (fib_dir==base):
-            score=min(99,score+fb)
-            log.info("%s at FIBONACCI +%d -> score %d"%(iid,fb,score))
-
-        # ---- WEEKLY TREND BIAS ----
-        wb=weekly_bias(iid)
-        if wb!="NEUTRAL":
-            if (wb=="BULL" and base=="LONG") or (wb=="BEAR" and base=="SHORT"):
-                score=min(99,score+10)
-                log.info("%s weekly trend agrees +10 -> score %d"%(iid,score))
-            elif (wb=="BULL" and base=="SHORT") or (wb=="BEAR" and base=="LONG"):
-                score=max(0,score-20)
-                log.info("%s AGAINST weekly trend -20 -> score %d"%(iid,score))
 
         # ---- ML SHADOW PREDICTION ----
         h_utc=datetime.now(timezone.utc).hour
@@ -1320,19 +1109,21 @@ def scan_tf(iid, ii, tf, params, bal, state, oi):
             return None
 
         # ---- WEIGHTED MTF CONFLUENCE ----
-        mtf_ok,mtf_bonus=mtf_score(iid,base,tf)
+        mtf_ok, mtf_bonus=mtf_score(iid,base,tf)
         if not mtf_ok:
             write_signal_log(iid,base,tf,score,sigs,False,regime,atr_pct,rsi_v,vr_v,spread_ratio,ml_pred)
             return None
         score=min(99,score+mtf_bonus)
         if mtf_bonus>0: log.info("%s MTF bonus +%d -> score %d"%(iid,mtf_bonus,score))
 
-        # ---- CLAUDE AI CONFIRMATION — ALWAYS ON ----
-        zone,_=smc_pd_zone(h2,l2,cl2)
-        bos,choch=smc_bos_choch(h2,l2,cl2)
-        ctx=("RSI:%.0f VR:%.1fx Zone:%s BOS:%s CHoCH:%s COT:%s Regime:%s ML:%d%% Weekly:%s"%(
-             rsi_v,vr_v,zone,str(bos),str(choch),cb,regime,ml_pred,wb))
-        score,ai_reason=ai_confirm(iid,base,sigs,score,ctx)
+        # ---- CLAUDE AI CONFIRMATION ----
+        ai_reason=""
+        if CLAUDE_API_KEY:
+            zone,_=smc_pd_zone(h2,l2,cl2)
+            bos,choch=smc_bos_choch(h2,l2,cl2)
+            ctx=("RSI:%.0f VR:%.1fx Zone:%s BOS:%s CHoCH:%s COT:%s Regime:%s ML:%d%%"%(
+                 rsi_v,vr_v,zone,str(bos),str(choch),cb,regime,ml_pred))
+            score,ai_reason=ai_confirm(iid,base,sigs,score,ctx)
 
         if score<MIN_SCORE:
             write_signal_log(iid,base,tf,score,sigs,False,regime,atr_pct,rsi_v,vr_v,spread_ratio,ml_pred)
