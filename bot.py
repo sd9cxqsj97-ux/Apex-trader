@@ -1215,7 +1215,7 @@ def get_kelly_mult():
     except Exception as e:
         log.warning("Kelly error: "+str(e)); return 1.0
 
-def get_lots(bal, c2, inst="", regime="RANGING"):
+def get_lots(bal, c2, inst="", regime="RANGING", score=0):
     base=get_tier(bal)["lots"]
     if c2>=6: lots=round(base*1.5,2)
     elif c2>=5: lots=round(base*1.2,2)
@@ -1225,6 +1225,10 @@ def get_lots(bal, c2, inst="", regime="RANGING"):
     lots=round(lots*get_kelly_mult(),2)
     # Regime — halve size in volatile conditions
     if regime=="VOLATILE": lots=round(lots*0.5,2)
+    # Score-based multiplier — bet bigger on highest-conviction signals
+    if score>=90:   lots=round(lots*1.30,2)
+    elif score>=80: lots=round(lots*1.15,2)
+    # No boost for score <80 — standard sizing
     day=datetime.now(timezone.utc).weekday()
     if day>=5: lots=round(lots*0.7,2)
     return max(0.01,lots)
@@ -1319,6 +1323,16 @@ def manage(state):
                     try: close_trade(tid); log.info(tid+" max hold")
                     except: pass
                     continue
+            # Stale scalp exit — if barely moving at 50% of max hold, free the slot
+            if params["max_hold_min"]<9999:
+                age=(datetime.now(timezone.utc)-datetime.fromisoformat(info["opened"])).total_seconds()/60
+                half_hold=params["max_hold_min"]*0.5
+                if age>=half_hold and pa<0.25 and not info.get("partial_tp"):
+                    try:
+                        close_trade(tid)
+                        log.info("%s stale scalp exit: %.0f min old, only %.2fR — closing"%(tid,age,pa))
+                        continue
+                    except: pass
             # Partial TP at 0.8x ATR — close 50% of position, lock in profit
             if pa>=0.8 and not info.get("partial_tp"):
                 try:
@@ -1331,15 +1345,37 @@ def manage(state):
                         alert("PARTIAL TP",info["inst"]+" — closed 50% at %.1fR profit"%pa,"default","money_with_wings")
                         log.info("%s partial TP: closed %d of %d units at %.1fR"%(tid,half,cur_units,pa))
                 except Exception as e: log.warning("Partial TP error "+tid+": "+str(e))
-            # Breakeven at 1x ATR
-            if pa>=1.0 and not info.get("be"):
+            # ---- STEPPED TRAILING STOP ----
+            # Each step locks in more profit as the trade runs further.
+            # No more giving back a full ATR move to get to breakeven.
+            if pa>=0.5 and not info.get("be"):
+                # Step 1: 0.5R reached → move to breakeven (sooner than before)
                 try:
                     set_sl(tid,en); info["sl"]=en; info["be"]=True
-                    alert("Breakeven",info["inst"]+" "+dr+" — SL moved to entry","default","shield")
+                    alert("Breakeven",info["inst"]+" "+dr+" — SL to entry at 0.5R","default","shield")
+                    log.info("%s stepped trail step1: breakeven at %.1fR"%(tid,pa))
                 except: pass
-            # Trailing stop from 1.5x ATR
-            if pa>=params.get("trail",1.5):
-                ns=(mid-av*0.5 if dr=="LONG" else mid+av*0.5)
+            elif pa>=1.0 and not info.get("trail_1"):
+                # Step 2: 1R reached → lock in 0.3R profit
+                lock=(en+av*0.3 if dr=="LONG" else en-av*0.3)
+                cs=info.get("sl",0)
+                if (dr=="LONG" and lock>cs) or (dr=="SHORT" and lock<cs):
+                    try:
+                        set_sl(tid,lock); info["sl"]=lock; info["trail_1"]=True
+                        log.info("%s stepped trail step2: +0.3R locked at %.1fR"%(tid,pa))
+                    except: pass
+            elif pa>=1.5 and not info.get("trail_2"):
+                # Step 3: 1.5R reached → lock in 0.8R profit
+                lock=(en+av*0.8 if dr=="LONG" else en-av*0.8)
+                cs=info.get("sl",0)
+                if (dr=="LONG" and lock>cs) or (dr=="SHORT" and lock<cs):
+                    try:
+                        set_sl(tid,lock); info["sl"]=lock; info["trail_2"]=True
+                        log.info("%s stepped trail step3: +0.8R locked at %.1fR"%(tid,pa))
+                    except: pass
+            # Step 4: 2R+ → tight trailing stop (0.4xATR behind peak)
+            if pa>=2.0:
+                ns=(mid-av*0.4 if dr=="LONG" else mid+av*0.4)
                 cs=info.get("sl",0)
                 if (dr=="LONG" and ns>cs) or (dr=="SHORT" and ns<cs):
                     try: set_sl(tid,ns); info["sl"]=ns
@@ -1531,7 +1567,7 @@ def scan_tf(iid, ii, tf, params, bal, state, oi):
 
         write_signal_log(iid,base,tf,score,sigs,True,regime,atr_pct,rsi_v,vr_v,spread_ratio,ml_pred)
         return {"dir":base,"tp":tp,"sl":sl,"en":en,"AT":AT,
-                "lots":get_lots(bal,len(sigs),iid,regime),"sigs":sigs,"score":score,
+                "lots":get_lots(bal,len(sigs),iid,regime,score),"sigs":sigs,"score":score,
                 "tf":tf,"ai_reason":ai_reason,"regime":regime,"ml_pred":ml_pred}
     except Exception as e:
         log.warning("Scan TF error %s %s: %s"%(iid,tf,str(e))); return None

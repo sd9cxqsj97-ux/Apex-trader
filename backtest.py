@@ -185,8 +185,51 @@ def liq_sweep(hi, lo, cl):
     if hi[-1] > rh and cl[-1] < rh: return True, "BEAR"
     return False, "NONE"
 
+def pin_bar(o, hi, lo, cl, atr):
+    """Detect hammer (bull) or shooting star (bear) via wick/body ratio."""
+    if len(cl) < 5 or atr == 0: return False, "NONE"
+    body  = abs(cl[-1] - o[-1])
+    rng   = hi[-1] - lo[-1]
+    if body < 0.001 * cl[-1] or rng < atr * 0.5: return False, "NONE"
+    upper = hi[-1] - max(cl[-1], o[-1])
+    lower = min(cl[-1], o[-1]) - lo[-1]
+    if lower >= body * 2.0 and upper <= body * 0.5:
+        return True, "BULL"  # hammer
+    if upper >= body * 2.0 and lower <= body * 0.5:
+        return True, "BEAR"  # shooting star
+    return False, "NONE"
+
+def detect_regime(hi, lo, cl, atr):
+    """TRENDING / RANGING / VOLATILE — matches bot.py V5."""
+    if len(cl) < 30 or atr == 0: return "RANGING"
+    try:
+        atr_hist = []
+        for i in range(max(1, len(cl)-21), len(cl)-1):
+            trs = [max(hi[j]-lo[j], abs(hi[j]-cl[j-1]), abs(lo[j]-cl[j-1]))
+                   for j in range(max(1, i-13), i+1)]
+            atr_hist.append(sum(trs[-14:])/14 if len(trs)>=14 else trs[-1])
+        if atr_hist:
+            rank = sum(1 for a in atr_hist if a < atr) / len(atr_hist)
+            if rank > 0.80: return "VOLATILE"
+    except: pass
+    try:
+        n = min(14, len(cl)-1)
+        pdm=[]; mdm=[]; trl=[]
+        for i in range(-n, 0):
+            hd = hi[i]-hi[i-1]; ld = lo[i-1]-lo[i]
+            pdm.append(hd if hd>ld and hd>0 else 0)
+            mdm.append(ld if ld>hd and ld>0 else 0)
+            trl.append(max(hi[i]-lo[i], abs(hi[i]-cl[i-1]), abs(lo[i]-cl[i-1])))
+        atr14 = sum(trl)/n if trl else atr
+        if atr14 > 0:
+            pdi = sum(pdm)/n/atr14*100; mdi = sum(mdm)/n/atr14*100
+            dx  = abs(pdi-mdi)/(pdi+mdi)*100 if (pdi+mdi)>0 else 0
+            if dx > 25: return "TRENDING"
+    except: pass
+    return "RANGING"
+
 # ================================================================
-# SMC ENGINE — Smart Money Concepts (matches bot.py V4 exactly)
+# SMC ENGINE — Smart Money Concepts (matches bot.py V5 exactly)
 # ================================================================
 def smc_order_block(o, hi, lo, cl, mid, atr):
     if len(cl) < 15 or atr == 0: return False, "NONE"
@@ -378,6 +421,22 @@ def check_strategies(o, hi, lo, cl, vols, mid, h_utc, tf="H4", atr=0):
     if zone == "DISCOUNT" and RSI < 50: bull.append("SMC_DISCOUNT")
     if zone == "PREMIUM"  and RSI > 50: bear.append("SMC_PREMIUM")
 
+    # 20. PIN BAR (hammer / shooting star)
+    if atr > 0:
+        pb_hit, pb_dir = pin_bar(o, hi, lo, cl, atr)
+        if pb_hit:
+            if pb_dir == "BULL": bull.append("PIN_BAR")
+            else:                bear.append("PIN_BAR")
+
+    # 21. RSI Divergence (only at extremes)
+    rsi_s_vals = rsi_s(cl)
+    if len(rsi_s_vals) >= 5 and len(cl) >= 5:
+        rsi_now = rsi_s_vals[-1]; rsi_prev = rsi_s_vals[-3]
+        if rsi_now < 40:
+            if cl[-1] < cl[-3] and rsi_now > rsi_prev: bull.append("RSI_DIV")
+        if rsi_now > 60:
+            if cl[-1] > cl[-3] and rsi_now < rsi_prev: bear.append("RSI_DIV")
+
     # 200 EMA filter — hard gate on H4/D, soft (2% distance) on H1
     above200 = (mid > e200)
     if tf in ("H4", "D"):
@@ -498,19 +557,38 @@ def backtest_tf(iid, ii, tf, candles, train_cutoff):
         if direction not in ("LONG", "SHORT"):
             continue
 
-        # Session quality bonus — matches bot.py V4 session_quality()
+        # Session quality bonus — matches bot.py V5 session_quality()
         sq = 10 if 13 <= h_utc < 16 else (4 if (7 <= h_utc < 10 or 12 <= h_utc < 17) else 0)
         score = min(99, score + sq)
 
+        # Regime detection — matches bot.py V5.2
+        regime = detect_regime(h2, l2, cl2, atr)
+
+        # Dynamic min score — matches bot.py V5.2 get_min_score()
+        dyn_min = MIN_SCORE
+        if regime == "VOLATILE":  dyn_min += 10
+        elif regime == "TRENDING": dyn_min -= 2
+        if h_utc < 7 or h_utc >= 22: dyn_min += 7
+        elif 13 <= h_utc < 16:        dyn_min -= 5
+        dyn_min = max(55, min(82, dyn_min))
+
         # WEAK_STRATS count toward score but not toward MIN_STRATS threshold
         qualifying = len([s for s in sigs if s not in WEAK_STRATS])
-        if score < MIN_SCORE or qualifying < MIN_STRATS:
+        if score < dyn_min or qualifying < MIN_STRATS:
             continue
+
+        # Adaptive TP/SL by regime — matches bot.py V5.2
+        p = dict(params)
+        if regime == "TRENDING":
+            p["tp"] = params["tp"] * 1.25; p["sl"] = params["sl"] * 1.00
+        elif regime == "RANGING":
+            p["tp"] = params["tp"] * 0.75; p["sl"] = params["sl"] * 0.85
+        elif regime == "VOLATILE":
+            p["tp"] = params["tp"] * 0.60; p["sl"] = params["sl"] * 0.65
 
         phase = "TRAIN" if ctime < train_cutoff else "TEST"
 
-        result, rr, hold = simulate_trade(
-            direction, mid, atr, params, complete[i+1:])
+        result, rr, hold = simulate_trade(direction, mid, atr, p, complete[i+1:])
 
         trades.append({
             "time":         complete[i]["time"],
@@ -520,6 +598,7 @@ def backtest_tf(iid, ii, tf, candles, train_cutoff):
             "direction":    direction,
             "hour":         h_utc,
             "session":      session_name(h_utc),
+            "regime":       regime,
             "score":        score,
             "signals":      ",".join(sigs),
             "signal_count": len(sigs),
@@ -602,10 +681,19 @@ def session_stats(trades):
         out[sess] = {"trades": len(ts), "wr": win_rate(ts), "rr": avg_rr(ts)}
     return out
 
+def regime_stats(trades):
+    """Win rate by market regime — tells us which conditions to favour/avoid."""
+    data = defaultdict(list)
+    for t in trades: data[t.get("regime","RANGING")].append(t)
+    out = {}
+    for reg, ts in data.items():
+        out[reg] = {"trades": len(ts), "wr": win_rate(ts), "rr": avg_rr(ts)}
+    return out
+
 def top_combos(trades, min_wr=60.0, min_trades=5):
     data = defaultdict(list)
     for t in trades:
-        key = t["name"] + " | " + t["tf"] + " | " + t["session"]
+        key = t["name"] + " | " + t["tf"] + " | " + t["session"] + " | " + t.get("regime","?")
         data[key].append(t)
     out = []
     for key, ts in data.items():
@@ -619,7 +707,7 @@ def top_combos(trades, min_wr=60.0, min_trades=5):
 # ================================================================
 def write_csv(trades):
     path = "backtest_results.csv"
-    fields = ["time","instrument","name","tf","direction","hour","session",
+    fields = ["time","instrument","name","tf","direction","hour","session","regime",
               "score","signals","signal_count","result","rr","hold_bars","phase"]
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=fields)
@@ -844,6 +932,7 @@ def main():
     strat_s  = strategy_stats(all_trades)
     inst_s   = instrument_stats(all_trades)
     sess_s   = session_stats(all_trades)
+    regime_s = regime_stats(all_trades)
     combos   = top_combos(all_trades)
     equity   = build_equity(all_trades)
 
@@ -857,7 +946,11 @@ def main():
     print("Final Balance: ${:.2f}  (started ${:.2f})".format(equity[-1], START_BALANCE))
     print("60%+ combos  : {}".format(len(combos)))
 
-    print("\n--- TOP COMBOS ---")
+    print("\n--- REGIME PERFORMANCE ---")
+    for reg, d in sorted(regime_s.items(), key=lambda x: x[1]["wr"], reverse=True):
+        print("  {:<12} {}t  {}% WR  {} RR".format(reg, d["trades"], d["wr"], d["rr"]))
+
+    print("\n--- TOP COMBOS (pair | tf | session | regime) ---")
     for c in combos[:10]:
         print("  {}  |  {}t  |  {}% WR  |  {} RR".format(
             c["combo"], c["trades"], c["wr"], c["rr"]))
