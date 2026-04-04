@@ -1,0 +1,15 @@
+# Bot state files (change every run — not useful to track)
+state.json
+trading_bot.log
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Environment files (never commit secrets)
+.env
+*.env
+
+# Old signal log backup
+signal_log.csv.bak
