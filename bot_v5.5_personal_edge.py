@@ -755,106 +755,20 @@ def uk_hour():
 # ================================================================
 # BRIEFINGS
 # ================================================================
-_brief={"LONDON":"","NEWYORK":"","CLOSE":"","FTMO_MORNING":""}
-
-# ================================================================
-# EQUITY CURVE FILTER — raises MIN_SCORE when system is cold
-# If last N trades are net negative, don't keep hammering the market
-# ================================================================
-def equity_curve_filter(state):
-    """Check recent trade P&L. Returns score penalty (0 or +10) to add to MIN_SCORE."""
-    journal = state.get("journal", [])
-    recent = journal[-5:] if len(journal) >= 5 else journal
-    if not recent:
-        return 0
-    net = sum(float(t.get("pl", 0)) for t in recent)
-    if net < 0:
-        log.info("Equity curve filter: last %d trades net $%.2f — raising MIN_SCORE +10" % (len(recent), net))
-        return 10   # cold system — be more selective
-    return 0
-
-# ================================================================
-# WEEKLY PROFIT LOCK — protects a good week from a bad Friday
-# If we're up 3%+ on the week, drop to micro risk for the rest of it
-# ================================================================
-WEEKLY_LOCK_PCT = 0.03   # 3% weekly profit = lock in, go micro
-_weekly_lock = {"week": "", "locked": False}
-
-def weekly_profit_check(bal):
-    """Returns True if weekly lock is active (bot should micro-size or skip)."""
-    if not FTMO_MODE:
-        return False
-    now = datetime.now(timezone.utc)
-    week_key = now.strftime("%Y-W%W")
-    if _weekly_lock["week"] != week_key:
-        _weekly_lock["week"] = week_key
-        _weekly_lock["locked"] = False
-    profit_pct = (bal - FTMO_START_BAL) / FTMO_START_BAL
-    if profit_pct >= WEEKLY_LOCK_PCT and not _weekly_lock["locked"]:
-        _weekly_lock["locked"] = True
-        alert("WEEKLY PROFIT LOCK",
-              "Up %.1f%% this week — switching to micro-size to protect gains" % (profit_pct*100),
-              "default", "lock")
-        log.info("WEEKLY LOCK: profit %.1f%% — micro-size only for rest of week" % (profit_pct*100))
-    return _weekly_lock["locked"]
-
-# ================================================================
-# INSTRUMENT DAILY TRADE LIMIT — max 2 trades per instrument per day
-# Prevents overtrading one market (Gold 6x in a day = bad)
-# ================================================================
-def inst_daily_count(state, iid):
-    """Count how many trades were opened today for this instrument."""
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    count = 0
-    for t in state.get("journal", []):
-        if t.get("inst") == iid:
-            closed = t.get("closed", "")
-            if closed.startswith(today):
-                count += 1
-    # Also count currently open trades on this instrument
-    for tid, info in state.get("trades", {}).items():
-        if info.get("inst") == iid:
-            count += 1
-    return count
-
-MAX_INST_DAILY = 2   # max trades per instrument per day
+_brief={"LONDON":"","NEWYORK":"","CLOSE":""}
 
 def send_briefing(period):
     try:
         ac=get_account(); bal=float(ac["balance"]); st=load_state()
         w=st["wins"]; l=st["losses"]; t2=w+l; wr=round(w/t2*100) if t2 else 0
         news=get_news(); ev1=news[0].get("title","None") if news else "None"
-        t={"LONDON":"LONDON OPEN 07:00","NEWYORK":"NEW YORK OPEN 14:30","CLOSE":"NY CLOSE 21:00",
-           "FTMO_MORNING":"FTMO MORNING UPDATE"}
+        t={"LONDON":"LONDON OPEN 07:00","NEWYORK":"NEW YORK OPEN 14:30","CLOSE":"NY CLOSE 21:00"}
         cot=get_cot()
         cot_s="|".join([k+":"+v["bias"][0] for k,v in list(cot.items())[:4]]) if cot else "loading"
         msg=("Bal:$"+str(round(bal,2))+" | "+str(w)+"W/"+str(l)+"L ("+str(wr)+"%)\n"
              "USD:"+dxy_bias()+" | Open:"+str(len(st["trades"]))+"\n"
-             "COT: "+cot_s+"\nNews: "+ev1+"\nBot V5.5: ACTIVE")
+             "COT: "+cot_s+"\nNews: "+ev1+"\nBot V5.3: ACTIVE")
         msg += ftmo_status_msg(st, bal)
-        if period == "FTMO_MORNING" and FTMO_MODE:
-            # Detailed FTMO morning briefing
-            start = FTMO_START_BAL
-            profit = bal - start
-            profit_pct = profit / start * 100
-            days = len(st.get("ftmo_days_traded", []))
-            daily_budget = start * FTMO_DAILY_LIMIT
-            daily_used = st.get("ftmo_daily_loss", 0.0)
-            remaining = max(0, daily_budget - daily_used)
-            bars = int(min(10, max(0, profit_pct / FTMO_TARGET / 100 * 10)))
-            bar_str = "[" + "#"*bars + "-"*(10-bars) + "]"
-            msg = ("FTMO CHALLENGE DAY UPDATE\n"
-                   "Balance: $%.2f (%+.2f)\n"
-                   "Progress: %.1f%% / 10%%  %s\n"
-                   "Days traded: %d (need 4 min)\n"
-                   "Daily budget remaining: $%.2f\n"
-                   "Weekly lock: %s\n"
-                   "Equity filter: %s\n"
-                   "Bot status: ACTIVE V5.5" % (
-                   bal, profit, profit_pct, bar_str,
-                   days, remaining,
-                   "LOCKED (micro)" if weekly_profit_check(bal) else "open",
-                   "+10 cold" if equity_curve_filter(st) else "normal"))
         alert(t.get(period,"BRIEFING"),msg,"default","newspaper")
     except Exception as e: log.warning("Briefing error: "+str(e))
 
@@ -1746,10 +1660,9 @@ def manage(state):
                         set_sl(tid,lock); info["sl"]=lock; info["trail_2"]=True
                         log.info("%s stepped trail step3: +0.8R locked at %.1fR"%(tid,pa))
                     except: pass
-            # Step 4: 2R+ → tight trailing stop (0.4xATR, 0.5xATR for Gold — more volatile)
+            # Step 4: 2R+ → tight trailing stop (0.4xATR behind peak)
             if pa>=2.0:
-                trail_mult = 0.5 if info.get("inst") == "XAU_USD" else 0.4
-                ns=(mid-av*trail_mult if dr=="LONG" else mid+av*trail_mult)
+                ns=(mid-av*0.4 if dr=="LONG" else mid+av*0.4)
                 cs=info.get("sl",0)
                 if (dr=="LONG" and ns>cs) or (dr=="SHORT" and ns<cs):
                     try: set_sl(tid,ns); info["sl"]=ns
@@ -1900,8 +1813,8 @@ def scan_tf(iid, ii, tf, params, bal, state, oi):
         ml_pred=ml_predict(iid,tf,score,regime,h_utc,rsi_v,vr_v)
         log.info("%s ML shadow: %d%% win prob"%(iid,ml_pred))
 
-        # Dynamic minimum score — adjusts for regime, session, losing streak + equity curve
-        dyn_min = get_min_score(regime, state, h_utc) + equity_curve_filter(state)
+        # Dynamic minimum score — adjusts for regime, session, losing streak
+        dyn_min=get_min_score(regime,state,h_utc)
         if score<dyn_min:
             log.info("%s score %d < dynamic min %d (regime=%s) — skip"%(iid,score,dyn_min,regime))
             write_signal_log(iid,base,tf,score,sigs,False,regime,atr_pct,rsi_v,vr_v,spread_ratio,ml_pred)
@@ -1977,10 +1890,6 @@ def scan(state):
             if iid in oi or no>=max_t: continue
             if not in_session(ii["sessions"]): continue
             if news_block(iid): continue
-            # Instrument daily trade limit — no more than 2 trades per instrument per day
-            if inst_daily_count(state, iid) >= MAX_INST_DAILY:
-                log.info("%s daily limit reached (%d trades today) — skip" % (iid, MAX_INST_DAILY))
-                continue
             result=None
             for tf in ii.get("scalp_tf",[]):
                 result=scan_tf(iid,ii,tf,SCALP_P.get(tf,{}),bal,state,oi)
@@ -2003,10 +1912,6 @@ def scan(state):
                 final_lots = result["lots"]
                 if FTMO_MODE:
                     final_lots = ftmo_lots(bal, result["lots"], result["score"])
-                    # Weekly profit lock — micro-size to protect gains
-                    if weekly_profit_check(bal):
-                        final_lots = max(0.01, round(final_lots * 0.25, 2))
-                        log.info("WEEKLY LOCK active: %s lots cut to %.2f" % (iid, final_lots))
                     # Portfolio heat check
                     sl_dist = abs(result["en"] - result["sl"])
                     if not ftmo_portfolio_heat(state, sl_dist, final_lots, iid):
@@ -2082,7 +1987,6 @@ while True:
         state=daily_reset(state)
         ukh=uk_hour(); utm=datetime.now(timezone.utc).minute
         today=datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        if ukh==6  and utm<4  and _brief["FTMO_MORNING"]!=today: send_briefing("FTMO_MORNING"); _brief["FTMO_MORNING"]=today
         if ukh==7  and utm<4  and _brief["LONDON"]!=today:  send_briefing("LONDON");  _brief["LONDON"]=today
         if ukh==14 and utm>=30 and utm<34 and _brief["NEWYORK"]!=today: send_briefing("NEWYORK"); _brief["NEWYORK"]=today
         if ukh==21 and utm<4  and _brief["CLOSE"]!=today:   send_briefing("CLOSE");   _brief["CLOSE"]=today
