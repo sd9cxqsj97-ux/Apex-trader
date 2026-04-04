@@ -14,7 +14,7 @@ Telegram + ntfy push notifications
 Removed dead strategies: DEATH_CROSS (11.8% WR), RSI_DIV (17.2%), LONDON_BREAK (26.3%)
 """
 
-import os,time,json,logging,requests,base64,csv,sys,re,threading,threading
+import os,time,json,logging,requests,base64,csv,sys,re,threading
 from datetime import datetime,timezone,timedelta
 
 # ================================================================
@@ -35,33 +35,8 @@ TRADE_LOG   = "trade_log.csv"
 SIGNAL_LOG  = "signal_log.csv"   # all signals from ALL instruments (learning data)
 STATE_FILE  = "state.json"
 MAX_TRADES  = 8
-MIN_SCORE   = 65   # base threshold — get_min_score() adjusts this dynamically
+MIN_SCORE   = 65
 MIN_STRATS  = 3
-
-def get_min_score(regime="RANGING", state=None, h_utc=None):
-    """Dynamic minimum score threshold. Raises bar in bad conditions,
-    lowers slightly in peak liquidity. Protects capital when bot is cold."""
-    base = MIN_SCORE
-    if h_utc is None:
-        h_utc = datetime.now(timezone.utc).hour
-    # Regime adjustment
-    if regime == "VOLATILE":
-        base += 10   # wild market — only take very strong signals
-    elif regime == "TRENDING":
-        base -= 2    # clean trend — slightly more permissive
-    # Session adjustment
-    if 13 <= h_utc < 16:
-        base -= 5    # London/NY overlap — best liquidity, trust signals more
-    elif h_utc < 7 or h_utc >= 22:
-        base += 7    # Asian/off-hours — thin market, be selective
-    # Consecutive loss streak adjustment
-    if state:
-        streak = int(state.get("consec_losses", 0))
-        if streak >= 3:
-            base += 7    # cold streak — raise bar until bot warms up
-        elif streak >= 2:
-            base += 3
-    return max(55, min(82, base))   # hard clamp 55-82
 
 # Adaptive scan speed by session (seconds)
 # Overlap = every 30s, Active = every 60s, Asian/Off = every 120s
@@ -198,45 +173,23 @@ def get_news():
     except Exception as e: log.warning("News fetch error: "+str(e))
     return _nc["data"]
 
-def _news_window(title):
-    """Return (before_min, after_min) blackout window based on event importance.
-    NFP and rate decisions get much wider windows than routine data."""
-    t = title.upper()
-    if any(k in t for k in ["NON-FARM","NFP","NONFARM"]):
-        return 90, 60      # NFP: 90 min before, 60 min after
-    if any(k in t for k in ["INTEREST RATE","RATE DECISION","FOMC","FED FUNDS","BOE RATE","ECB RATE","RBA RATE","BOJ RATE"]):
-        return 120, 60     # Central bank rate decisions: 2 hours before
-    if any(k in t for k in ["CPI","INFLATION","PPI","PRICE INDEX"]):
-        return 60, 30      # Inflation data: 1 hour before
-    if any(k in t for k in ["GDP","GROSS DOMESTIC"]):
-        return 45, 20
-    if any(k in t for k in ["EMPLOYMENT","JOBLESS","UNEMPLOYMENT","PAYROLL"]):
-        return 60, 30
-    return 30, 15          # All other high-impact: 30 min before, 15 min after
-
 def news_block(inst):
-    """Returns True if trading this instrument is blocked due to nearby news."""
-    now = datetime.now(timezone.utc)
-    curr = []
-    if "XAU" in inst or "XAG" in inst: curr = ["USD"]
-    elif "BCO" in inst or "WTICO" in inst: curr = ["USD"]
-    elif "SPX" in inst or "NAS" in inst or "US30" in inst: curr = ["USD"]
+    now=datetime.now(timezone.utc)
+    curr=[]
+    if "XAU" in inst or "XAG" in inst: curr=["USD"]
+    elif "BCO" in inst or "WTICO" in inst: curr=["USD","OIL"]
+    elif "SPX" in inst or "NAS" in inst or "US30" in inst: curr=["USD"]
     else:
-        p = inst.split("_")
-        if len(p) == 2: curr = [p[0], p[1]]
+        p=inst.split("_")
+        if len(p)==2: curr=[p[0],p[1]]
     for ev in get_news():
         try:
-            t   = datetime.fromisoformat(ev.get("date","").replace("Z","+00:00"))
-            dm  = (t - now).total_seconds() / 60   # minutes until event (neg = past)
-            ttl = ev.get("title","")
-            before, after = _news_window(ttl)
-            if -after <= dm <= before:
-                ec = ev.get("country","").upper()
+            t=datetime.fromisoformat(ev.get("date","").replace("Z","+00:00"))
+            dm=(t-now).total_seconds()/60
+            if -5<=dm<=30:
+                ec=ev.get("country","").upper()
                 if any(c in ec for c in curr):
-                    if dm >= 0:
-                        log.info("NEWS BLOCK: %s in %.0f min (window -%d/+%d)"%(ttl,dm,before,after))
-                    else:
-                        log.info("NEWS BLOCK: %s ended %.0f min ago (cooling off)"%(ttl,abs(dm)))
+                    log.info("NEWS BLOCK: "+ev.get("title","")+" in "+str(int(dm))+"min")
                     return True
         except: pass
     return False
@@ -851,115 +804,106 @@ def ml_predict(iid, tf, score, regime, h_utc, rsi_val, vr_val):
     except: return 50
 
 # ================================================================
-# CLAUDE AI CONFIRMATION — APEX-AI DEVIL'S ADVOCATE ENSEMBLE
-# Haiku  = Bullish analyst:  "Rate signal quality 0-100"
-# Sonnet = Risk manager:     "Rate RISK OF FAILURE 0-100"
-# Sonnet risk is INVERTED -> quality score, then blended with Haiku.
-# SPLIT verdict (gap>30): analyst likes it but risk manager hates it
-#   -> score penalty (-10), bot becomes cautious. Saves bad trades.
-# Both agree (gap<=15): small confidence bonus (+4).
-# Runs in parallel threads — total wait = slowest model (~3s).
+# CLAUDE AI CONFIRMATION — APEX-AI ENSEMBLE
+# Two models vote on every signal. Consensus = confidence bonus.
+# Disagreement = uncertainty penalty. Runs in parallel threads.
 # ================================================================
-def _ai_call(model, prompt, results, key, timeout=13):
-    """Call one Claude model and store parsed result in results[key]."""
+
+# Model weights: Sonnet is smarter, Haiku is a fast second opinion
+AI_MODELS = [
+    ("claude-haiku-4-5-20251001", 0.40),
+    ("claude-sonnet-4-6",         0.60),
+]
+
+def _ai_call_model(model, prompt, result, key):
+    """Call one Claude model and store score+reason in result dict."""
     try:
         r = requests.post(
             "https://api.anthropic.com/v1/messages",
             headers={"x-api-key": CLAUDE_API_KEY,
                      "anthropic-version": "2023-06-01",
                      "content-type": "application/json"},
-            json={"model": model, "max_tokens": 100,
+            json={"model": model, "max_tokens": 90,
                   "messages": [{"role": "user", "content": prompt}]},
-            timeout=timeout
+            timeout=12
         )
         if r.ok:
             txt = r.json()["content"][0]["text"]
             m = re.search(r'"s"\s*:\s*(\d+).*?"r"\s*:\s*"([^"]+)"', txt, re.DOTALL)
             if m:
-                results[key] = {"score": int(m.group(1)), "reason": m.group(2)}
+                result[key] = {"score": int(m.group(1)), "reason": m.group(2)}
     except Exception as e:
-        log.warning("APEX-AI %s error: %s" % (model, str(e)))
+        log.warning("APEX-AI model %s error: %s" % (model, str(e)))
 
 def ai_confirm(iid, direction, sigs, score, context):
-    """Devil's Advocate ensemble. Haiku = bull analyst, Sonnet = risk manager.
-    Returns (adjusted_score, reason). Both run in parallel threads."""
+    """Ensemble AI: both models vote in parallel. Returns (adjusted_score, reason).
+    Consensus bonus if both agree (gap<20). Penalty if they disagree (gap>30)."""
     if not CLAUDE_API_KEY:
         log.warning("CLAUDE_API_KEY not set - AI confirmation offline.")
         return score, "AI offline"
     try:
-        strats = ",".join(sigs[:8])
-        # Haiku: optimistic analyst — what makes this trade attractive?
-        bull_prompt = ("Rate this forex signal quality 0-100. Higher = better entry. "
-                       "Pair:%s Dir:%s Base:%d Strats:%s | %s "
-                       "Reply JSON only: {\"s\":75,\"r\":\"brief reason\"}"
-                       % (iid, direction, score, strats, context))
-        # Sonnet: skeptical risk manager — what could kill this trade?
-        bear_prompt = ("You are a skeptical forex risk manager. "
-                       "Rate the RISK OF FAILURE for this signal 0-100. "
-                       "100=certain loser, 0=no risk. Check: wrong trend direction, "
-                       "bad session timing, overbought/oversold, wide spread, "
-                       "key resistance ahead, conflicting timeframes, low volume. "
-                       "Pair:%s Dir:%s Base:%d Strats:%s | %s "
-                       "Reply JSON only: {\"s\":40,\"r\":\"brief risk reason\"}"
-                       % (iid, direction, score, strats, context))
+        prompt = ("Rate forex signal 0-100 for trade quality. "
+                  "Pair:%s Dir:%s Base:%d Strats:%s | %s "
+                  "Reply JSON only: {\"s\":75,\"r\":\"brief reason\"}"
+                  % (iid, direction, score, ",".join(sigs[:8]), context))
 
         results = {}
-        t1 = threading.Thread(target=_ai_call,
-                              args=("claude-haiku-4-5-20251001", bull_prompt, results, "bull"))
-        t2 = threading.Thread(target=_ai_call,
-                              args=("claude-sonnet-4-6", bear_prompt, results, "bear"))
-        t1.daemon = True; t2.daemon = True
-        t1.start(); t2.start()
-        t1.join(timeout=14); t2.join(timeout=14)
+        threads = []
+        for (model, _) in AI_MODELS:
+            t = threading.Thread(target=_ai_call_model,
+                                 args=(model, prompt, results, model))
+            t.daemon = True
+            threads.append(t)
+            t.start()
+        for t in threads:
+            t.join(timeout=15)
 
-        bull = results.get("bull")   # Haiku optimist score (0-100, higher=better)
-        bear = results.get("bear")   # Sonnet risk score   (0-100, higher=riskier)
+        # Collect scores from whichever models responded
+        valid = [(w, results[m]["score"], results[m]["reason"])
+                 for (m, w) in AI_MODELS if m in results]
 
-        if not bull and not bear:
-            log.warning("APEX-AI: both models timed out for %s" % iid)
+        if not valid:
+            log.warning("APEX-AI: no model responded for %s" % iid)
             return score, "AI timeout"
 
-        if bull and not bear:
-            final = int(score * 0.60 + bull["score"] * 0.40)
-            log.info("APEX-AI %s (haiku only): base=%d bull=%d final=%d [%s]"
-                     % (iid, score, bull["score"], final, bull["reason"]))
-            return final, bull["reason"]
+        if len(valid) == 1:
+            # Only one model responded — use it alone
+            w, ai_s, reason = valid[0]
+            final = int(score * 0.60 + ai_s * 0.40)
+            log.info("APEX-AI %s (1 model): base=%d ai=%d final=%d [%s]"
+                     % (iid, score, ai_s, final, reason))
+            return final, reason
 
-        if bear and not bull:
-            quality = 100 - bear["score"]
-            final = int(score * 0.60 + quality * 0.40)
-            log.info("APEX-AI %s (sonnet only): base=%d risk=%d quality=%d final=%d [%s]"
-                     % (iid, score, bear["score"], quality, final, bear["reason"]))
-            return final, "RISK:" + bear["reason"]
+        # Both models responded — ensemble blend
+        scores   = [s for (_, s, _) in valid]
+        weights  = [w for (w, _, _) in valid]
+        reasons  = [r for (_, _, r) in valid]
+        gap      = abs(scores[0] - scores[1])
+        w_sum    = sum(weights)
+        ai_blend = int(sum(s*w for (w,s,_) in valid) / w_sum)
 
-        # Both responded — devil's advocate blend
-        bull_s  = bull["score"]
-        risk_s  = bear["score"]
-        quality = 100 - risk_s           # invert risk -> quality (0-100)
-        blend   = int(bull_s * 0.50 + quality * 0.50)
-
-        gap = abs(bull_s - quality)
-        if gap <= 15:
-            adj     = 4
-            verdict = "AGREE"            # analyst + risk mgr agree -> confident
+        # Consensus bonus: both bullish/bearish on same side with small gap
+        if gap <= 20:
+            consensus_adj = 4
+            agree_txt = "AGREE"
         elif gap <= 30:
-            adj     = 0
-            verdict = "NEAR"
+            consensus_adj = 0
+            agree_txt = "NEAR"
         else:
-            adj     = -10
-            verdict = "SPLIT"            # serious disagreement -> caution
+            # Disagreement penalty — models see conflicting signals
+            consensus_adj = -8
+            agree_txt = "SPLIT"
 
-        ai_final = max(0, min(100, blend + adj))
+        ai_final = max(0, min(100, ai_blend + consensus_adj))
         final    = int(score * 0.60 + ai_final * 0.40)
-        reason   = "[%s] Bull:%d Risk:%d Q:%d->%d | %s | RISK:%s" % (
-                   verdict, bull_s, risk_s, quality, ai_final,
-                   bull["reason"][:35], bear["reason"][:35])
-        log.info("APEX-AI DEVIL %s: base=%d bull=%d risk=%d quality=%d blend=%d adj=%+d final=%d [%s]"
-                 % (iid, score, bull_s, risk_s, quality, blend, adj, final, verdict))
+        reason   = "[%s gap:%d] H:%d S:%d -> %d | %s" % (
+                   agree_txt, gap, scores[0], scores[1], ai_final, reasons[1])
+        log.info("APEX-AI ENSEMBLE %s: base=%d haiku=%d sonnet=%d blend=%d adj=%+d final=%d [%s]"
+                 % (iid, score, scores[0], scores[1], ai_blend, consensus_adj, final, agree_txt))
         return final, reason
 
     except Exception as e:
-        log.warning("APEX-AI error: " + str(e))
+        log.warning("APEX-AI ensemble error: " + str(e))
         return score, ""
 
 # ================================================================
@@ -1473,10 +1417,7 @@ def scan_tf(iid, ii, tf, params, bal, state, oi):
         ml_pred=ml_predict(iid,tf,score,regime,h_utc,rsi_v,vr_v)
         log.info("%s ML shadow: %d%% win prob"%(iid,ml_pred))
 
-        # Dynamic minimum score — adjusts for regime, session, losing streak
-        dyn_min=get_min_score(regime,state,h_utc)
-        if score<dyn_min:
-            log.info("%s score %d < dynamic min %d (regime=%s) — skip"%(iid,score,dyn_min,regime))
+        if score<MIN_SCORE:
             write_signal_log(iid,base,tf,score,sigs,False,regime,atr_pct,rsi_v,vr_v,spread_ratio,ml_pred)
             return None
 
@@ -1494,40 +1435,19 @@ def scan_tf(iid, ii, tf, params, bal, state, oi):
         score=min(99,score+mtf_bonus)
         if mtf_bonus>0: log.info("%s MTF bonus +%d -> score %d"%(iid,mtf_bonus,score))
 
-        # ---- CLAUDE AI DEVIL'S ADVOCATE — ALWAYS ON ----
+        # ---- CLAUDE AI CONFIRMATION — ALWAYS ON ----
         zone,_=smc_pd_zone(h2,l2,cl2)
         bos,choch=smc_bos_choch(h2,l2,cl2)
         ctx=("RSI:%.0f VR:%.1fx Zone:%s BOS:%s CHoCH:%s COT:%s Regime:%s ML:%d%% Weekly:%s"%(
              rsi_v,vr_v,zone,str(bos),str(choch),cb,regime,ml_pred,wb))
         score,ai_reason=ai_confirm(iid,base,sigs,score,ctx)
 
-        if score<dyn_min:
-            log.info("%s AI-adjusted score %d below dynamic min %d — skip"%(iid,score,dyn_min))
+        if score<MIN_SCORE:
             write_signal_log(iid,base,tf,score,sigs,False,regime,atr_pct,rsi_v,vr_v,spread_ratio,ml_pred)
             return None
 
-        # ---- ADAPTIVE TP/SL BY REGIME ----
-        # TRENDING: let winners run (wider TP, same SL)
-        # RANGING:  take profits fast (tighter TP and SL)
-        # VOLATILE: protect capital (tightest everything)
-        if regime == "TRENDING":
-            tp_m = params["tp"] * 1.25
-            sl_m = params["sl"] * 1.00
-            log.info("%s TRENDING regime: TP widened to %.2fx ATR"%(iid,tp_m))
-        elif regime == "RANGING":
-            tp_m = params["tp"] * 0.75
-            sl_m = params["sl"] * 0.85
-            log.info("%s RANGING regime: TP tightened to %.2fx ATR"%(iid,tp_m))
-        elif regime == "VOLATILE":
-            tp_m = params["tp"] * 0.60
-            sl_m = params["sl"] * 0.65
-            log.info("%s VOLATILE regime: TP/SL tightened to %.2f/%.2fx ATR"%(iid,tp_m,sl_m))
-        else:
-            tp_m = params["tp"]
-            sl_m = params["sl"]
-
-        if base=="LONG":  tp=ask+AT*tp_m; sl=ask-AT*sl_m; en=ask
-        else:             tp=bid-AT*tp_m; sl=bid+AT*sl_m; en=bid
+        if base=="LONG":  tp=ask+AT*params["tp"]; sl=ask-AT*params["sl"]; en=ask
+        else:             tp=bid-AT*params["tp"]; sl=bid+AT*params["sl"]; en=bid
 
         write_signal_log(iid,base,tf,score,sigs,True,regime,atr_pct,rsi_v,vr_v,spread_ratio,ml_pred)
         return {"dir":base,"tp":tp,"sl":sl,"en":en,"AT":AT,
