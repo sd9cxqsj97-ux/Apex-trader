@@ -14,7 +14,7 @@ Telegram + ntfy push notifications
 Removed dead strategies: DEATH_CROSS (11.8% WR), RSI_DIV (17.2%), LONDON_BREAK (26.3%)
 """
 
-import os,time,json,logging,requests,base64,csv,sys,re,threading
+import os,time,json,logging,requests,base64,csv,sys,re,threading,threading
 from datetime import datetime,timezone,timedelta
 
 # ================================================================
@@ -37,152 +37,6 @@ STATE_FILE  = "state.json"
 MAX_TRADES  = 8
 MIN_SCORE   = 65   # base threshold — get_min_score() adjusts this dynamically
 MIN_STRATS  = 3
-
-# ================================================================
-# FTMO / PROP FIRM MODE
-# Hard rules — any breach = challenge failed. We stay inside with buffers.
-# Set FTMO_MODE=True when trading a prop firm challenge.
-# ================================================================
-FTMO_MODE         = True     # ON — currently in $10k challenge
-FTMO_START_BAL    = 10000.0  # Challenge starting balance
-FTMO_DAILY_LIMIT  = 0.04     # Hard stop at 4% daily loss  (FTMO limit = 5%, 1% buffer)
-FTMO_TOTAL_LIMIT  = 0.08     # Hard stop at 8% total loss  (FTMO limit = 10%, 2% buffer)
-FTMO_TARGET       = 0.10     # Profit target = 10% ($1,000 on $10k)
-FTMO_LOCKDOWN_PCT = 0.085    # At 8.5% profit: switch to ultra-conservative mode
-FTMO_MAX_TRADES   = 3        # Max concurrent trades in FTMO mode (tighter than normal)
-FTMO_RISK_PCT     = 0.005    # 0.5% account risk per trade in FTMO mode
-FTMO_MAX_HEAT     = 0.02     # Max total open risk at once = 2% of account (portfolio heat)
-FTMO_MIN_SCORE    = 72       # Higher bar in FTMO mode — only take strong signals
-
-def ftmo_check(state, bal):
-    """Hard FTMO rule enforcement. Returns (allowed, reason).
-    Called before every trade. If not allowed, bot stops cold."""
-    if not FTMO_MODE:
-        return True, ""
-    start = FTMO_START_BAL
-    # Daily loss check — hard stop
-    daily_loss_pct = state.get("ftmo_daily_loss", 0.0) / start
-    if daily_loss_pct >= FTMO_DAILY_LIMIT:
-        msg = "FTMO DAILY LIMIT HIT: %.1f%% (limit %.0f%%) — ALL TRADING STOPPED FOR TODAY" % (
-              daily_loss_pct*100, FTMO_DAILY_LIMIT*100)
-        log.critical(msg)
-        alert("FTMO DAILY LIMIT", msg, "high", "x")
-        return False, "daily_limit"
-    # Total drawdown check — hard stop
-    peak = max(state.get("ftmo_peak_bal", start), bal)
-    state["ftmo_peak_bal"] = peak
-    drawdown_pct = (peak - bal) / start
-    if drawdown_pct >= FTMO_TOTAL_LIMIT:
-        msg = "FTMO TOTAL DRAWDOWN HIT: %.1f%% (limit %.0f%%) — CHALLENGE AT RISK" % (
-              drawdown_pct*100, FTMO_TOTAL_LIMIT*100)
-        log.critical(msg)
-        alert("FTMO DRAWDOWN ALERT", msg, "high", "rotating_light")
-        return False, "total_drawdown"
-    # Warning zone — 75% of daily limit used
-    if daily_loss_pct >= FTMO_DAILY_LIMIT * 0.75:
-        log.warning("FTMO WARNING: daily loss at %.1f%% of %.0f%% limit" % (
-                    daily_loss_pct*100, FTMO_DAILY_LIMIT*100))
-    # Target reached — lock down
-    profit_pct = (bal - start) / start
-    if profit_pct >= FTMO_LOCKDOWN_PCT:
-        log.info("FTMO LOCKDOWN MODE: profit %.1f%% — ultra-conservative only" % (profit_pct*100))
-    return True, ""
-
-def ftmo_lots(bal, base_lots, score=0):
-    """Calculate safe lot size for FTMO. Risk-based sizing: 0.5% per trade.
-    In lockdown mode (near target), cut to 0.25% risk."""
-    if not FTMO_MODE:
-        return base_lots
-    start  = FTMO_START_BAL
-    profit = (bal - start) / start
-    # Drawdown-based reduction
-    peak   = bal  # simplified; tracked in state elsewhere
-    risk_pct = FTMO_RISK_PCT
-    if profit >= FTMO_LOCKDOWN_PCT:
-        risk_pct = 0.0025   # lockdown: quarter risk, protect the pass
-    # Risk per trade in dollars
-    risk_usd = bal * risk_pct
-    # Minimum viable: use base_lots but cap at what the risk budget allows
-    # Assume average SL = 50 pips. Adjust per instrument if needed.
-    # This is a conservative cap — actual SL varies per trade
-    max_lots = round(risk_usd / 50.0, 2)   # $50 per pip risk cap
-    lots = min(base_lots, max(0.01, max_lots))
-    # Score boost: high-conviction = slightly bigger (capped at 2x risk_pct)
-    if score >= 90 and profit < FTMO_LOCKDOWN_PCT:
-        lots = round(lots * 1.20, 2)
-    return max(0.01, lots)
-
-def ftmo_portfolio_heat(state, new_sl_dist, new_lots, instrument):
-    """Check if adding this trade would exceed max portfolio heat (2% of account).
-    sl_dist in price terms, lots in standard lots.
-    Returns True if safe to proceed."""
-    if not FTMO_MODE:
-        return True
-    try:
-        # Estimate current open risk from state
-        open_risk = 0.0
-        for tid, info in state.get("trades", {}).items():
-            sl  = info.get("sl", 0)
-            en  = info.get("entry", 0)
-            ls  = info.get("lots", 0.01)
-            # Rough dollar risk estimate
-            sl_dist_price = abs(en - sl)
-            if sl_dist_price > 0 and en > 0:
-                # pip value approximation: $10/pip/standard lot for most pairs
-                pip_v  = 10.0
-                pips   = sl_dist_price / 0.0001
-                open_risk += pips * pip_v * ls
-        # New trade risk
-        pip_v     = 10.0
-        pips      = new_sl_dist / 0.0001
-        new_risk  = pips * pip_v * new_lots
-        total_risk_pct = (open_risk + new_risk) / FTMO_START_BAL
-        if total_risk_pct > FTMO_MAX_HEAT:
-            log.warning("FTMO heat check: adding %s would push risk to %.1f%% (limit %.0f%%)" % (
-                        instrument, total_risk_pct*100, FTMO_MAX_HEAT*100))
-            return False
-        return True
-    except:
-        return True   # on error, allow trade (don't block on calculation failure)
-
-def ftmo_daily_reset(state):
-    """Reset FTMO daily loss tracker at midnight UTC."""
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    if state.get("ftmo_daily_date","") != today:
-        prev = state.get("ftmo_daily_loss", 0.0)
-        if prev > 0:
-            log.info("FTMO daily reset — yesterday loss: $%.2f" % prev)
-        state["ftmo_daily_loss"] = 0.0
-        state["ftmo_daily_date"] = today
-    return state
-
-def ftmo_status_msg(state, bal):
-    """Build FTMO status string for Telegram briefings."""
-    if not FTMO_MODE:
-        return ""
-    start       = FTMO_START_BAL
-    profit      = bal - start
-    profit_pct  = profit / start * 100
-    daily_loss  = state.get("ftmo_daily_loss", 0.0)
-    daily_pct   = daily_loss / start * 100
-    peak        = state.get("ftmo_peak_bal", start)
-    dd_pct      = max(0, (peak - bal) / start * 100)
-    target_usd  = start * FTMO_TARGET
-    progress    = min(100, max(0, profit / target_usd * 100))
-    lockdown    = profit_pct >= FTMO_LOCKDOWN_PCT * 100
-    msg  = "\n--- FTMO CHALLENGE STATUS ---\n"
-    msg += "Profit:    %+.2f (%+.1f%%)   [target: +%.0f%%]\n" % (profit, profit_pct, FTMO_TARGET*100)
-    msg += "Progress:  %.0f%% toward $%.0f target\n" % (progress, target_usd)
-    msg += "Daily P&L: %s$%.2f (%.1f%% of %.0f%% limit)\n" % (
-           "-" if daily_loss>0 else "+", abs(daily_loss), daily_pct, FTMO_DAILY_LIMIT*100)
-    msg += "Drawdown:  %.1f%% of %.0f%% limit\n" % (dd_pct, FTMO_TOTAL_LIMIT*100)
-    if lockdown:
-        msg += "STATUS:    LOCKDOWN MODE — near target, ultra-conservative\n"
-    elif daily_pct >= FTMO_DAILY_LIMIT*75:
-        msg += "STATUS:    WARNING — near daily limit, be careful\n"
-    else:
-        msg += "STATUS:    ACTIVE — trading normally\n"
-    return msg
 
 def get_min_score(regime="RANGING", state=None, h_utc=None):
     """Dynamic minimum score threshold. Raises bar in bad conditions,
@@ -663,8 +517,7 @@ def send_briefing(period):
         cot_s="|".join([k+":"+v["bias"][0] for k,v in list(cot.items())[:4]]) if cot else "loading"
         msg=("Bal:$"+str(round(bal,2))+" | "+str(w)+"W/"+str(l)+"L ("+str(wr)+"%)\n"
              "USD:"+dxy_bias()+" | Open:"+str(len(st["trades"]))+"\n"
-             "COT: "+cot_s+"\nNews: "+ev1+"\nBot V5.3: ACTIVE")
-        msg += ftmo_status_msg(st, bal)
+             "COT: "+cot_s+"\nNews: "+ev1+"\nBot V4: ACTIVE")
         alert(t.get(period,"BRIEFING"),msg,"default","newspaper")
     except Exception as e: log.warning("Briefing error: "+str(e))
 
@@ -1384,30 +1237,18 @@ def bad_time():
     n=datetime.now(timezone.utc)
     return (n.weekday()==0 and n.hour<10) or (n.weekday()==4 and n.hour>=17)
 
-def can_trade(state, bal):
-    # FTMO hard limits — checked first, override everything
-    if FTMO_MODE:
-        allowed, reason = ftmo_check(state, bal)
-        if not allowed:
-            return False
-        # In FTMO mode use tighter consecutive loss rule (2 not 3)
-        if state.get("consec", 0) >= 2:
-            log.warning("FTMO mode: 2 consecutive losses — pausing to protect challenge")
-            return False
-        # Max trades lower in FTMO mode
-        return True
-    # Standard mode
-    tier = get_tier(bal)
-    if state["daily_loss"] >= bal * tier["dloss"]:
+def can_trade(state,bal):
+    tier=get_tier(bal)
+    if state["daily_loss"]>=bal*tier["dloss"]:
         log.warning("Daily loss limit hit — pausing"); return False
-    if state.get("consec", 0) >= 3:
+    if state["consec"]>=3:
         alert("3 CONSECUTIVE LOSSES","Bot paused. Will resume next scan.","high","x")
         log.warning("3 consecutive losses — pausing"); return False
     return True
 
 def daily_reset(state):
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    if state.get("daily_date","") != today:
+    today=datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if state.get("daily_date","")!=today:
         w=state["wins"]; l=state["losses"]; t2=w+l; dl=state["daily_loss"]
         if t2>0 or dl>0:
             wr=round(w/t2*100) if t2 else 0
@@ -1415,27 +1256,12 @@ def daily_reset(state):
             alert("DAILY SUMMARY",summary,"default","bar_chart")
         state["daily_loss"]=0.0; state["daily_date"]=today; state["consec"]=0
         log.info("Daily reset")
-    # FTMO daily reset
-    ftmo_daily_reset(state)
     return state
 
 def load_state():
     try:
-        with open(STATE_FILE) as f: s=json.load(f)
-    except: s={}
-    s.setdefault("trades",{})
-    s.setdefault("daily_loss",0.0)
-    s.setdefault("daily_date","")
-    s.setdefault("wins",0)
-    s.setdefault("losses",0)
-    s.setdefault("consec",0)
-    s.setdefault("journal",[])
-    # FTMO fields
-    s.setdefault("ftmo_daily_loss",0.0)
-    s.setdefault("ftmo_daily_date","")
-    s.setdefault("ftmo_peak_bal", FTMO_START_BAL)
-    s.setdefault("ftmo_days_traded", [])
-    return s
+        with open(STATE_FILE) as f: return json.load(f)
+    except: return {"trades":{},"daily_loss":0.0,"daily_date":"","wins":0,"losses":0,"consec":0,"journal":[]}
 
 def save_state(s):
     with open(STATE_FILE,"w") as f: json.dump(s,f,default=str)
@@ -1454,13 +1280,8 @@ def manage(state):
         if tid not in open_trades:
             pl=float(info.get("pl",0))
             result="WIN" if pl>=0 else "LOSS"
-            if pl>=0:
-                state["wins"]+=1; state["consec"]=0
-            else:
-                state["losses"]+=1; state["daily_loss"]+=abs(pl); state["consec"]+=1
-                # FTMO: track daily loss separately for hard limit enforcement
-                if FTMO_MODE:
-                    state["ftmo_daily_loss"]=state.get("ftmo_daily_loss",0.0)+abs(pl)
+            if pl>=0: state["wins"]+=1; state["consec"]=0
+            else:     state["losses"]+=1; state["daily_loss"]+=abs(pl); state["consec"]+=1
             try:
                 opened=datetime.fromisoformat(info["opened"])
                 dur=int((datetime.now(timezone.utc)-opened).total_seconds()/60)
@@ -1756,13 +1577,9 @@ def scan(state):
         ac=get_account(); bal=float(ac["balance"])
         no=len(state["trades"]); oi={v["inst"] for v in state["trades"].values()}
         log.info("Bal:$%.2f Open:%d/%d AI:%s"%(bal,no,MAX_TRADES,"ON" if CLAUDE_API_KEY else "OFF"))
-        # FTMO: update peak balance every scan
-        if FTMO_MODE:
-            state["ftmo_peak_bal"] = max(state.get("ftmo_peak_bal", FTMO_START_BAL), bal)
-        max_t = FTMO_MAX_TRADES if FTMO_MODE else MAX_TRADES
-        if no>=max_t or not can_trade(state,bal) or bad_time(): return state
+        if no>=MAX_TRADES or not can_trade(state,bal) or bad_time(): return state
         for iid,ii in INSTRUMENTS.items():
-            if iid in oi or no>=max_t: continue
+            if iid in oi or no>=MAX_TRADES: continue
             if not in_session(ii["sessions"]): continue
             if news_block(iid): continue
             result=None
@@ -1774,32 +1591,18 @@ def scan(state):
                     result=scan_tf(iid,ii,tf,SWING_P.get(tf,SWING_P["H4"]),bal,state,oi)
                     if result: break
             if not result: continue
-            # FTMO: enforce higher min score
-            if FTMO_MODE and result["score"] < FTMO_MIN_SCORE:
-                log.info("FTMO: skipping %s score %d < FTMO min %d"%(iid,result["score"],FTMO_MIN_SCORE))
-                continue
             # Only execute trades on TRADE_PAIRS instruments
             if iid not in TRADE_PAIRS:
                 log.info("MONITOR %s %s score:%d — signal logged, no trade (not in TRADE_PAIRS)"%(iid,result["dir"],result["score"]))
                 continue
             try:
-                # FTMO: override lots with safe prop-firm sizing
-                final_lots = result["lots"]
-                if FTMO_MODE:
-                    final_lots = ftmo_lots(bal, result["lots"], result["score"])
-                    # Portfolio heat check
-                    sl_dist = abs(result["en"] - result["sl"])
-                    if not ftmo_portfolio_heat(state, sl_dist, final_lots, iid):
-                        log.info("FTMO heat limit: skipping %s to protect portfolio risk cap"%iid)
-                        continue
-
-                res=place(iid,result["dir"],final_lots,result["tp"],result["sl"])
+                res=place(iid,result["dir"],result["lots"],result["tp"],result["sl"])
                 tid=res.get("orderFillTransaction",{}).get("tradeOpened",{}).get("tradeID")
                 if tid:
                     state["trades"][tid]={
                         "inst":iid,"dir":result["dir"],"entry":result["en"],
                         "tp":result["tp"],"sl":result["sl"],"atr":result["AT"],
-                        "lots":final_lots,"strats":result["sigs"],"score":result["score"],
+                        "lots":result["lots"],"strats":result["sigs"],"score":result["score"],
                         "tf":result["tf"],"be":False,"ai_reason":result["ai_reason"],
                         "opened":datetime.now(timezone.utc).isoformat(),"pl":0
                     }
@@ -1807,13 +1610,6 @@ def scan(state):
                     trade_type="SCALP" if result["tf"] in ["M5","M15","H1"] else "SWING"
                     smc_tags=[s for s in result["sigs"] if s.startswith("SMC_")]
                     smc_str=(" ["+",".join(smc_tags)+"]") if smc_tags else ""
-                    # Track trading day for FTMO minimum days requirement
-                    if FTMO_MODE:
-                        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-                        days = state.get("ftmo_days_traded",[])
-                        if today not in days: days.append(today); state["ftmo_days_traded"]=days
-                    profit_pct=(bal-FTMO_START_BAL)/FTMO_START_BAL*100 if FTMO_MODE else 0
-                    ftmo_tag=(" | FTMO %.1f%%->%.0f%%"%(profit_pct,FTMO_TARGET*100)) if FTMO_MODE else ""
                     msg=(ii["n"]+" "+result["tf"]+" "+trade_type+smc_str+"\n"
                          "Score: "+str(result["score"])+" | "+str(len(result["sigs"]))+" signals\n"
                          "Signals: "+",".join(result["sigs"][:6])+"\n"
@@ -1821,7 +1617,7 @@ def scan(state):
                          " | ML: "+str(result.get("ml_pred",50))+"%\n"
                          "Entry: "+str(round(result["en"],5))+"\n"
                          "TP: "+str(round(result["tp"],5))+" | SL: "+str(round(result["sl"],5))+"\n"
-                         "Lots: "+str(final_lots)+" | Balance: $"+str(round(bal,2))+ftmo_tag)
+                         "Lots: "+str(result["lots"])+" | Balance: $"+str(round(bal,2)))
                     if result["ai_reason"]: msg+="\nAI: "+result["ai_reason"]
                     alert("NEW "+result["dir"]+" "+trade_type,msg,"high","rocket")
                     log.info("Opened %s %s %s %s %s"%(tid,iid,result["dir"],result["tf"],trade_type))

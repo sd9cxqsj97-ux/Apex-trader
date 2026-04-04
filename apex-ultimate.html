@@ -67,6 +67,36 @@ body{height:100%;background:var(--bg);color:var(--tx);font-family:var(--ui);over
 #pnl-charts{overflow:hidden}
 #pnl-charts.on{display:flex;flex-direction:column}
 
+/* FTMO PANEL */
+.ftmo-panel{margin:8px 8px 0;background:var(--s2);border:1px solid rgba(240,180,41,.25);border-radius:10px;padding:12px;position:relative;overflow:hidden}
+.ftmo-panel::before{content:'FTMO CHALLENGE';position:absolute;top:8px;right:10px;font-family:var(--mn);font-size:7px;letter-spacing:2px;color:var(--gold);opacity:.5}
+.ftmo-title{font-family:var(--mn);font-size:10px;font-weight:700;letter-spacing:2px;color:var(--gold);margin-bottom:10px;display:flex;align-items:center;gap:6px}
+.ftmo-status-dot{width:8px;height:8px;border-radius:50%;background:var(--g);box-shadow:0 0 8px var(--g);animation:pls 1.5s infinite}
+.ftmo-status-dot.warn{background:var(--a);box-shadow:0 0 8px var(--a)}
+.ftmo-status-dot.danger{background:var(--r);box-shadow:0 0 8px var(--r)}
+.ftmo-status-dot.lockdown{background:var(--pu);box-shadow:0 0 8px var(--pu)}
+.ftmo-bars{display:flex;flex-direction:column;gap:7px}
+.ftmo-bar-row{display:flex;align-items:center;gap:8px}
+.ftmo-bar-lbl{font-family:var(--mn);font-size:8px;color:var(--mi);width:52px;flex-shrink:0;letter-spacing:.5px}
+.ftmo-bar-track{flex:1;height:8px;background:var(--b);border-radius:4px;overflow:hidden;position:relative}
+.ftmo-bar-fill{height:100%;border-radius:4px;transition:width .6s ease}
+.ftmo-bar-fill.profit{background:linear-gradient(90deg,rgba(0,230,118,.4),var(--g))}
+.ftmo-bar-fill.daily{background:linear-gradient(90deg,var(--a),#ff6600)}
+.ftmo-bar-fill.drawdown{background:linear-gradient(90deg,var(--r),#cc0000)}
+.ftmo-bar-fill.safe{background:linear-gradient(90deg,rgba(0,230,118,.4),var(--g))}
+.ftmo-bar-fill.warn{background:linear-gradient(90deg,var(--a),#e67700)}
+.ftmo-bar-fill.danger{background:linear-gradient(90deg,var(--r),#aa0000)}
+.ftmo-bar-val{font-family:var(--mn);font-size:9px;font-weight:600;width:42px;text-align:right;flex-shrink:0}
+.ftmo-numbers{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:10px}
+.ftmo-num{background:var(--b);border-radius:5px;padding:6px 4px;text-align:center}
+.ftmo-num-val{font-family:var(--mn);font-size:11px;font-weight:700}
+.ftmo-num-lbl{font-family:var(--mn);font-size:7px;color:var(--mi);letter-spacing:.5px;margin-top:2px}
+.ftmo-alert{margin-top:8px;padding:6px 10px;border-radius:5px;font-family:var(--mn);font-size:10px;display:none}
+.ftmo-alert.warn{background:rgba(255,153,0,.1);border:1px solid rgba(255,153,0,.3);color:var(--a);display:block}
+.ftmo-alert.danger{background:rgba(255,68,68,.1);border:1px solid rgba(255,68,68,.3);color:var(--r);display:block}
+.ftmo-alert.lockdown{background:rgba(176,107,255,.1);border:1px solid rgba(176,107,255,.3);color:var(--pu);display:block}
+.ftmo-alert.pass{background:rgba(0,230,118,.1);border:1px solid rgba(0,230,118,.3);color:var(--g);display:block}
+
 /* SESSION BAR */
 .sess-bar{padding:6px 10px;background:var(--s1);border-bottom:1px solid var(--b);display:flex;gap:4px;align-items:center;flex-shrink:0}
 .sess-pill{flex:1;padding:5px 4px;border-radius:6px;background:var(--b);border:1px solid var(--b);text-align:center;font-family:var(--mn);transition:all .4s;cursor:default}
@@ -325,6 +355,37 @@ canvas#eq-chart{width:100% !important;height:140px !important}
 
   <!-- LIVE TAB -->
   <div class="panel on" id="pnl-live">
+    <!-- FTMO CHALLENGE PANEL -->
+    <div class="ftmo-panel" id="ftmo-panel">
+      <div class="ftmo-title">
+        <div class="ftmo-status-dot" id="ftmo-dot"></div>
+        FTMO $10K CHALLENGE
+      </div>
+      <div class="ftmo-bars">
+        <div class="ftmo-bar-row">
+          <div class="ftmo-bar-lbl">PROFIT</div>
+          <div class="ftmo-bar-track"><div class="ftmo-bar-fill profit" id="ftmo-profit-bar" style="width:0%"></div></div>
+          <div class="ftmo-bar-val" id="ftmo-profit-val" style="color:var(--g)">0%</div>
+        </div>
+        <div class="ftmo-bar-row">
+          <div class="ftmo-bar-lbl">DAILY P&L</div>
+          <div class="ftmo-bar-track"><div class="ftmo-bar-fill daily" id="ftmo-daily-bar" style="width:0%"></div></div>
+          <div class="ftmo-bar-val" id="ftmo-daily-val" style="color:var(--a)">0%</div>
+        </div>
+        <div class="ftmo-bar-row">
+          <div class="ftmo-bar-lbl">DRAWDOWN</div>
+          <div class="ftmo-bar-track"><div class="ftmo-bar-fill drawdown" id="ftmo-dd-bar" style="width:0%"></div></div>
+          <div class="ftmo-bar-val" id="ftmo-dd-val" style="color:var(--r)">0%</div>
+        </div>
+      </div>
+      <div class="ftmo-numbers">
+        <div class="ftmo-num"><div class="ftmo-num-val" id="ftmo-bal" style="color:var(--gold)">--</div><div class="ftmo-num-lbl">BALANCE</div></div>
+        <div class="ftmo-num"><div class="ftmo-num-val" id="ftmo-pnl-usd" style="color:var(--g)">--</div><div class="ftmo-num-lbl">P&amp;L $</div></div>
+        <div class="ftmo-num"><div class="ftmo-num-val" id="ftmo-days" style="color:var(--cy)">--</div><div class="ftmo-num-lbl">DAYS</div></div>
+        <div class="ftmo-num"><div class="ftmo-num-val" id="ftmo-target" style="color:var(--pu)">$1000</div><div class="ftmo-num-lbl">TARGET</div></div>
+      </div>
+      <div class="ftmo-alert" id="ftmo-alert"></div>
+    </div>
     <!-- Session Bar -->
     <div class="sess-bar">
       <div class="sess-pill" id="sess-asian">
@@ -841,6 +902,7 @@ function refreshLive() {
   document.getElementById("last-update").textContent = "Updating...";
   updateHeader();
   updateSessions();
+  loadFTMO();
   loadPositions();
   api("/api/signals?n=100", function(d){
     btn.classList.remove("spin");
@@ -1088,6 +1150,81 @@ function buildEquityChart(data) {
         }
       }
     }
+  });
+}
+
+// ============================================================
+// FTMO CHALLENGE PANEL
+// ============================================================
+var FTMO_START    = 10000;
+var FTMO_TARGET_P = 0.10;   // 10% target
+var FTMO_DAILY_L  = 0.04;   // 4% daily limit (our buffer)
+var FTMO_TOTAL_L  = 0.08;   // 8% total drawdown limit (our buffer)
+var FTMO_LOCKDOWN = 0.085;
+
+function updateFTMO(bal, dailyLoss, peakBal) {
+  if(!bal || bal <= 0) return;
+
+  var profit     = bal - FTMO_START;
+  var profitPct  = profit / FTMO_START;
+  var dailyPct   = (dailyLoss || 0) / FTMO_START;
+  var ddPct      = peakBal > FTMO_START ? Math.max(0, (peakBal - bal) / FTMO_START) : 0;
+
+  // Progress bars (as % of their respective limits)
+  var profitBarW = Math.min(100, (profitPct / FTMO_TARGET_P) * 100);
+  var dailyBarW  = Math.min(100, (dailyPct / FTMO_DAILY_L) * 100);
+  var ddBarW     = Math.min(100, (ddPct / FTMO_TOTAL_L) * 100);
+
+  document.getElementById("ftmo-profit-bar").style.width = profitBarW.toFixed(1) + "%";
+  document.getElementById("ftmo-daily-bar").style.width  = dailyBarW.toFixed(1)  + "%";
+  document.getElementById("ftmo-dd-bar").style.width     = ddBarW.toFixed(1)     + "%";
+
+  var profitEl = document.getElementById("ftmo-profit-val");
+  profitEl.textContent = (profitPct*100).toFixed(1) + "%";
+  profitEl.style.color = profitPct >= 0 ? "var(--g)" : "var(--r)";
+
+  document.getElementById("ftmo-daily-val").textContent = (dailyPct*100).toFixed(1) + "% / 4%";
+  document.getElementById("ftmo-dd-val").textContent    = (ddPct*100).toFixed(1) + "% / 8%";
+
+  document.getElementById("ftmo-bal").textContent    = "$" + bal.toFixed(0);
+  document.getElementById("ftmo-pnl-usd").textContent = (profit >= 0 ? "+" : "") + "$" + profit.toFixed(0);
+  document.getElementById("ftmo-pnl-usd").style.color = profit >= 0 ? "var(--g)" : "var(--r)";
+
+  var alertEl = document.getElementById("ftmo-alert");
+  var dotEl   = document.getElementById("ftmo-dot");
+  alertEl.className = "ftmo-alert";
+  dotEl.className   = "ftmo-status-dot";
+
+  if(profitPct >= FTMO_TARGET_P) {
+    alertEl.className = "ftmo-alert pass";
+    alertEl.textContent = "TARGET REACHED! +$" + profit.toFixed(0) + " — Reduce risk, protect the pass!";
+    dotEl.className = "ftmo-status-dot lockdown";
+  } else if(profitPct >= FTMO_LOCKDOWN) {
+    alertEl.className = "ftmo-alert lockdown";
+    alertEl.textContent = "LOCKDOWN MODE — " + (profitPct*100).toFixed(1) + "% profit. Ultra-conservative. Don't give it back.";
+    dotEl.className = "ftmo-status-dot lockdown";
+  } else if(ddPct >= FTMO_TOTAL_L * 0.85) {
+    alertEl.className = "ftmo-alert danger";
+    alertEl.textContent = "DANGER: Drawdown at " + (ddPct*100).toFixed(1) + "%! Hard stop at 8%. Stop trading!";
+    dotEl.className = "ftmo-status-dot danger";
+  } else if(dailyPct >= FTMO_DAILY_L * 0.75) {
+    alertEl.className = "ftmo-alert warn";
+    alertEl.textContent = "WARNING: Daily loss at " + (dailyPct*100).toFixed(1) + "% of 4% limit. Be careful.";
+    dotEl.className = "ftmo-status-dot warn";
+  }
+}
+
+function loadFTMO() {
+  oanda("accounts/"+ACCT+"/summary", function(d){
+    if(!d||!d.account) return;
+    var bal = parseFloat(d.account.balance||0);
+    api("/api/status", function(s){
+      var dailyLoss = s ? parseFloat(s.ftmo_daily_loss||0) : 0;
+      var peakBal   = s ? parseFloat(s.ftmo_peak_bal||FTMO_START) : FTMO_START;
+      var days      = s ? (s.ftmo_days_traded||[]).length : 0;
+      document.getElementById("ftmo-days").textContent = days + "/4";
+      updateFTMO(bal, dailyLoss, peakBal);
+    });
   });
 }
 
